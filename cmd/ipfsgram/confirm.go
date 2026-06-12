@@ -1,4 +1,4 @@
-package cli
+package main
 
 import (
 	"fmt"
@@ -39,11 +39,11 @@ func promptString(prompt string) (string, error) {
 	fmt.Fprintf(stdout, "%s: ", prompt)
 	line, err := readLine(stdin)
 	if err != nil && line == "" {
-		return "", fmt.Errorf("чтение ввода: %w", err)
+		return "", fmt.Errorf("read input: %w", err)
 	}
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", fmt.Errorf("пустой ввод")
+		return "", fmt.Errorf("empty input")
 	}
 	return line, nil
 }
@@ -56,14 +56,14 @@ func promptInt(prompt string) (int, error) {
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil {
-		return 0, fmt.Errorf("ожидалось число, получено %q", s)
+		return 0, fmt.Errorf("expected a number, got %q", s)
 	}
 	return v, nil
 }
 
-// readLine reads bytes one at a time until '\n' or EOF. Byte-at-a-time
-// reading avoids buffering ahead of the line, so interleaved prompts each
-// see their own input line.
+// readLine reads bytes one at a time until '\n' or EOF. Byte-at-a-time reading
+// avoids buffering ahead of the line, so interleaved prompts each see their own
+// input line.
 func readLine(r io.Reader) (string, error) {
 	var b strings.Builder
 	buf := make([]byte, 1)
@@ -79,4 +79,19 @@ func readLine(r io.Reader) (string, error) {
 			return b.String(), err
 		}
 	}
+}
+
+// humanBytes formats a byte count with binary prefixes.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	suffixes := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffixes[exp])
 }

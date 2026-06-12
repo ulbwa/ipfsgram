@@ -1,3 +1,6 @@
+// Command ipfsgram is the CLI and daemon for an IPFS blockstore backed by
+// Telegram channels. It wires the hexagonal architecture (domain, ports,
+// adapters, services) into cobra commands.
 package main
 
 import (
@@ -10,24 +13,15 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-
-	"github.com/ulbwa/ipfsgram/internal/cli"
-	"github.com/ulbwa/ipfsgram/internal/daemon"
 )
+
+// dsnEnv is the environment variable consulted when --dsn is unset.
+const dsnEnv = "IPFSGRAM_DSN"
 
 func main() {
 	setupLogger()
 
-	root := &cobra.Command{
-		Use:           "ipfsgram",
-		Short:         "IPFS blockstore on top of Telegram channels",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-	}
-	root.PersistentFlags().String("dsn", "", "PostgreSQL DSN (falls back to $"+cli.DSNEnv+")")
-
-	root.AddCommand(daemon.Command())
-	cli.Register(root)
+	root := newRootCmd()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -39,6 +33,34 @@ func main() {
 	}
 }
 
+// newRootCmd builds the root command with all subcommands attached.
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "ipfsgram",
+		Short:         "IPFS blockstore on top of Telegram channels",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.PersistentFlags().String("dsn", "", "PostgreSQL DSN (falls back to $"+dsnEnv+")")
+
+	root.AddCommand(
+		newDaemonCmd(),
+		newAddCmd(),
+		newRmCmd(),
+		newGCCmd(),
+		newStatusCmd(),
+		newDoctorCmd(),
+		newBotCmd(),
+		newChannelCmd(),
+		newMTProtoCmd(),
+		newConfigCmd(),
+		newDBCmd(),
+	)
+	return root
+}
+
+// setupLogger configures zerolog: a human console writer on a TTY, structured
+// JSON otherwise.
 func setupLogger() {
 	if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})

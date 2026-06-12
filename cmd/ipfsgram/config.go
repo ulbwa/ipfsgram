@@ -1,4 +1,4 @@
-package cli
+package main
 
 import (
 	"errors"
@@ -11,30 +11,30 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/repo"
+	"github.com/ulbwa/ipfsgram/internal/domain"
 )
 
-// configValidators whitelists the user-editable config keys and validates
-// their values.
+// configValidators whitelists the user-editable config keys and validates their
+// values.
 var configValidators = map[string]func(value string) error{
 	"car_max_size": func(v string) error {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {
-			return fmt.Errorf("car_max_size должен быть положительным целым числом байт, получено %q", v)
+			return fmt.Errorf("car_max_size must be a positive integer number of bytes, got %q", v)
 		}
 		return nil
 	},
 	"bot_api_url": func(v string) error {
 		u, err := url.Parse(v)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("bot_api_url должен быть http/https URL, получено %q", v)
+			return fmt.Errorf("bot_api_url must be an http/https URL, got %q", v)
 		}
 		return nil
 	},
 	"channel_warn_threshold": func(v string) error {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f < 0 || f > 1 {
-			return fmt.Errorf("channel_warn_threshold должен быть числом в диапазоне 0..1, получено %q", v)
+			return fmt.Errorf("channel_warn_threshold must be a number in 0..1, got %q", v)
 		}
 		return nil
 	},
@@ -53,7 +53,7 @@ func knownConfigKeys() []string {
 // validateConfigKey rejects keys outside the whitelist.
 func validateConfigKey(key string) error {
 	if _, ok := configValidators[key]; !ok {
-		return fmt.Errorf("неизвестный ключ %q, допустимые: %s",
+		return fmt.Errorf("unknown key %q, valid keys: %s",
 			key, strings.Join(knownConfigKeys(), ", "))
 	}
 	return nil
@@ -71,26 +71,26 @@ func validateConfigValue(key, value string) error {
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Глобальная конфигурация в БД",
+		Short: "Global configuration stored in the database",
 	}
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "get <key>",
-			Short: "Прочитать значение",
+			Short: "Read a value",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if err := validateConfigKey(args[0]); err != nil {
 					return err
 				}
 				ctx := cmd.Context()
-				e, err := openEnv(ctx, cmd)
+				a, err := openApp(ctx, cmd, "")
 				if err != nil {
 					return err
 				}
-				defer e.Close()
-				v, err := e.Config.Get(ctx, args[0])
-				if errors.Is(err, repo.ErrNotFound) {
-					return fmt.Errorf("ключ %q не установлен", args[0])
+				defer a.Close()
+				v, err := a.Config.Get(ctx, args[0])
+				if errors.Is(err, domain.ErrNotFound) {
+					return fmt.Errorf("key %q is not set", args[0])
 				}
 				if err != nil {
 					return err
@@ -101,19 +101,19 @@ func newConfigCmd() *cobra.Command {
 		},
 		&cobra.Command{
 			Use:   "set <key> <value>",
-			Short: "Установить значение",
+			Short: "Set a value",
 			Args:  cobra.ExactArgs(2),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				if err := validateConfigValue(args[0], args[1]); err != nil {
 					return err
 				}
 				ctx := cmd.Context()
-				e, err := openEnv(ctx, cmd)
+				a, err := openApp(ctx, cmd, "")
 				if err != nil {
 					return err
 				}
-				defer e.Close()
-				if err := e.Config.Set(ctx, args[0], args[1]); err != nil {
+				defer a.Close()
+				if err := a.Config.Set(ctx, args[0], args[1]); err != nil {
 					return err
 				}
 				fmt.Fprintf(stdout, "%s = %s\n", args[0], args[1])
@@ -128,26 +128,26 @@ func newConfigCmd() *cobra.Command {
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Состояние системы: каналы, боты, счётчики",
+		Short: "System status: channels, bots, counters",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			e, err := openEnv(ctx, cmd)
+			a, err := openApp(ctx, cmd, "")
 			if err != nil {
 				return err
 			}
-			defer e.Close()
+			defer a.Close()
 
-			warnThreshold, err := e.Config.GetFloat64(ctx, "channel_warn_threshold")
+			warnThreshold, err := a.Config.GetFloat64(ctx, "channel_warn_threshold")
 			if err != nil {
 				warnThreshold = 0.9
 			}
 
-			channels, err := e.Channels.List(ctx)
+			channels, err := a.Channels.List(ctx)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(stdout, "Каналы:")
+			fmt.Fprintln(stdout, "Channels:")
 			for _, ch := range channels {
 				fill := 0.0
 				if ch.MessageLimit > 0 {
@@ -161,44 +161,43 @@ func newStatusCmd() *cobra.Command {
 					ch.Title, ch.TgID, ch.MessageCount, ch.MessageLimit, fill*100, ch.Active, mark)
 			}
 
-			bots, err := e.Bots.List(ctx)
+			bots, err := a.Bots.List(ctx)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(stdout, "Боты:")
+			fmt.Fprintln(stdout, "Bots:")
 			for _, b := range bots {
 				fw := ""
 				if b.UnavailableUntil != nil && time.Now().Before(*b.UnavailableUntil) {
-					fw = " flood-wait до " + b.UnavailableUntil.Format(time.RFC3339)
+					fw = " flood-wait until " + b.UnavailableUntil.Format(time.RFC3339)
 				}
 				fmt.Fprintf(stdout, "  @%s (id %d) active=%t%s\n", b.Username, b.ID, b.Active, fw)
 			}
 
-			var pins, blocks int64
-			if err := e.db.GetContext(ctx, &pins, `SELECT count(*) FROM pins`); err != nil {
-				return err
-			}
-			if err := e.db.GetContext(ctx, &blocks, `SELECT count(*) FROM blocks`); err != nil {
-				return err
-			}
-			fmt.Fprintf(stdout, "Пины: %d\nБлоки: %d\n", pins, blocks)
-
-			rows, err := e.db.QueryContext(ctx,
-				`SELECT status, count(*) FROM cars GROUP BY status ORDER BY status`)
+			pins, err := a.Pins.Count(ctx)
 			if err != nil {
 				return err
 			}
-			defer rows.Close()
-			fmt.Fprintln(stdout, "CAR'ы по статусам:")
-			for rows.Next() {
-				var st string
-				var n int64
-				if err := rows.Scan(&st, &n); err != nil {
-					return err
-				}
-				fmt.Fprintf(stdout, "  %s: %d\n", st, n)
+			blocks, err := a.Blocks.CountAll(ctx)
+			if err != nil {
+				return err
 			}
-			return rows.Err()
+			fmt.Fprintf(stdout, "Pins: %d\nBlocks: %d\n", pins, blocks)
+
+			counts, err := a.Cars.CountByStatus(ctx)
+			if err != nil {
+				return err
+			}
+			statuses := make([]string, 0, len(counts))
+			for st := range counts {
+				statuses = append(statuses, string(st))
+			}
+			sort.Strings(statuses)
+			fmt.Fprintln(stdout, "CARs by status:")
+			for _, st := range statuses {
+				fmt.Fprintf(stdout, "  %s: %d\n", st, counts[domain.CarStatus(st)])
+			}
+			return nil
 		},
 	}
 }

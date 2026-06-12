@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Compiled binary from `go build ./...`
+/ipfsgram
+
 # Test binary, built with `go test -c`
 *.test
 
