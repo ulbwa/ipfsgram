@@ -19,6 +19,18 @@ func ResolveDSN(cmd *cobra.Command) string {
 	return os.Getenv(DSNEnv)
 }
 
-// Register attaches the top-level commands (add, get, pin, bot, channel, ...)
-// to the root command. Task 8 fills this in; it is intentionally empty for now.
-func Register(root *cobra.Command) {}
+// Register attaches the top-level commands to the root command.
+func Register(root *cobra.Command) {
+	root.AddCommand(
+		newAddCmd(),
+		newRmCmd(),
+		newGCCmd(),
+		newStatusCmd(),
+		newDoctorCmd(),
+		newBotCmd(),
+		newChannelCmd(),
+		newMTProtoCmd(),
+		newConfigCmd(),
+		newDBCmd(),
+	)
+}
