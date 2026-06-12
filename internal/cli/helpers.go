@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -96,8 +97,11 @@ func (e *env) findBot(ctx context.Context, arg string) (model.Bot, error) {
 	err := e.db.GetContext(ctx, &b, `
 		SELECT id, tg_id, username, token, active, unavailable_until
 		FROM bots WHERE username = $1`, username)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return model.Bot{}, fmt.Errorf("бот %q не найден", arg)
+	}
+	if err != nil {
+		return model.Bot{}, fmt.Errorf("поиск бота %q: %w", arg, err)
 	}
 	return b, nil
 }

@@ -67,6 +67,28 @@ func newGCCmd() *cobra.Command {
 			}
 			defer e.Close()
 
+			// Preview the candidates and prompt BEFORE taking the exclusive
+			// advisory lock: an interactive prompt must not stall every
+			// concurrent `ipfsgram add` holding out for the shared lock.
+			preview, err := gcCandidates(ctx, e)
+			if err != nil {
+				return err
+			}
+			if len(preview) == 0 {
+				fmt.Fprintln(stdout, "нечего собирать")
+				return nil
+			}
+			var previewTotal int64
+			for _, c := range preview {
+				previewTotal += c.Size
+			}
+			fmt.Fprintf(stdout, "Будет удалено %d CAR'ов общим размером %s\n",
+				len(preview), humanBytes(previewTotal))
+			if !yes && !Confirm("Продолжить?") {
+				fmt.Fprintln(stdout, "Отменено")
+				return nil
+			}
+
 			// The advisory lock lives for the duration of this transaction,
 			// serializing gc against other gc runs and against the shared
 			// lock held by `ipfsgram add` while we delete messages and rows
@@ -81,30 +103,19 @@ func newGCCmd() *cobra.Command {
 				return fmt.Errorf("advisory lock: %w", err)
 			}
 
-			cars, err := e.Cars.UnpinnedCars(ctx)
+			// Re-fetch under the lock: pins may have appeared or vanished
+			// while the prompt was open. Proceed with the fresh list without
+			// re-prompting.
+			candidates, err := gcCandidates(ctx, e)
 			if err != nil {
 				return err
 			}
-			// Pending cars belong to an in-flight or interrupted `add`
-			// (no pin yet, no message to delete) — doctor handles them.
-			var candidates []model.Car
-			var total int64
-			for _, c := range cars {
-				if c.Status == model.CarPending {
-					continue
-				}
-				candidates = append(candidates, c)
-				total += c.Size
+			if len(candidates) != len(preview) {
+				fmt.Fprintf(stdout, "список изменился за время подтверждения: теперь %d CAR'ов\n",
+					len(candidates))
 			}
 			if len(candidates) == 0 {
 				fmt.Fprintln(stdout, "нечего собирать")
-				return tx.Commit()
-			}
-
-			fmt.Fprintf(stdout, "Будет удалено %d CAR'ов общим размером %s\n",
-				len(candidates), humanBytes(total))
-			if !yes && !Confirm("Продолжить?") {
-				fmt.Fprintln(stdout, "Отменено")
 				return tx.Commit()
 			}
 
@@ -146,6 +157,24 @@ func newGCCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "не задавать вопросов, отвечать «да»")
 	return cmd
+}
+
+// gcCandidates returns the unpinned cars eligible for collection. Pending
+// cars belong to an in-flight or interrupted `add` (no pin yet, no message to
+// delete) — doctor handles them.
+func gcCandidates(ctx context.Context, e *env) ([]model.Car, error) {
+	cars, err := e.Cars.UnpinnedCars(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []model.Car
+	for _, c := range cars {
+		if c.Status == model.CarPending {
+			continue
+		}
+		candidates = append(candidates, c)
+	}
+	return candidates, nil
 }
 
 // gcDeleteCar deletes the car's Telegram message via a bot with can_delete

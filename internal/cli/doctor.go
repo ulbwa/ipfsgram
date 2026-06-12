@@ -178,7 +178,11 @@ func doctorRecovery(ctx context.Context, e *env, tr tg.Transport) error {
 		if !ok {
 			continue
 		}
-		switch e.probeCarMessage(ctx, tr, car, ch, bots, lc) {
+		check, err := e.probeCarMessage(ctx, tr, car, ch, bots, lc)
+		if err != nil {
+			return err
+		}
+		switch check {
 		case checkOK:
 			if err := e.Cars.SetStatus(ctx, car.ID, model.CarPublished); err != nil {
 				return err

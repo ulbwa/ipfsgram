@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
@@ -26,7 +29,11 @@ func main() {
 	root.AddCommand(daemon.Command())
 	cli.Register(root)
 
-	if err := root.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
+		stop()
 		log.Error().Err(err).Msg("command failed")
 		os.Exit(1)
 	}

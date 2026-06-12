@@ -347,6 +347,112 @@ func TestGetFloodWaitFailsOver(t *testing.T) {
 	}
 }
 
+func TestGetRetriesAfterEviction(t *testing.T) {
+	carBytes, block, c, off := carFixture(t)
+	ref := model.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: int32(len(block))}
+	car := model.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: model.CarPublished}
+	bots := []model.Bot{{ID: 1, Token: "t1", Active: true}}
+
+	var downloads int
+	var mu sync.Mutex
+	transport := &fakeTransport{download: func(string, int64, int64, string) (io.ReadCloser, string, error) {
+		mu.Lock()
+		downloads++
+		mu.Unlock()
+		return io.NopCloser(bytes.NewReader(carBytes)), "", nil
+	}}
+	f := newFixture(t, ref, c, car, bots, transport)
+
+	// Seed the cache so the first resolution is a hit.
+	src := filepath.Join(t.TempDir(), "seed.car")
+	if err := os.WriteFile(src, carBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, err := f.cache.Put(7, src, int64(len(carBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake an eviction race: the cache still indexes the entry, but the file
+	// is gone by the time Get tries to read it.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.bs.Get(context.Background(), c)
+	if err != nil {
+		t.Fatalf("Get after eviction: %v", err)
+	}
+	if !bytes.Equal(got.RawData(), block) {
+		t.Fatalf("payload mismatch: got %q want %q", got.RawData(), block)
+	}
+	if downloads != 1 {
+		t.Fatalf("want exactly one recovery download, got %d", downloads)
+	}
+}
+
+func TestGetCallerCancelDoesNotAbortDownload(t *testing.T) {
+	carBytes, block, c, off := carFixture(t)
+	ref := model.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: int32(len(block))}
+	car := model.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: model.CarPublished}
+	bots := []model.Bot{{ID: 1, Token: "t1", Active: true}}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var downloads int
+	var mu sync.Mutex
+	transport := &fakeTransport{download: func(string, int64, int64, string) (io.ReadCloser, string, error) {
+		mu.Lock()
+		downloads++
+		mu.Unlock()
+		close(started)
+		<-release
+		return io.NopCloser(bytes.NewReader(carBytes)), "", nil
+	}}
+	f := newFixture(t, ref, c, car, bots, transport)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := f.bs.Get(ctx, c)
+		errCh <- err
+	}()
+
+	<-started
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller: want context.Canceled, got %v", err)
+	}
+
+	// The download must keep going despite the cancelled caller; once it
+	// completes, the car is cached and a fresh Get is served without a
+	// second transport hit.
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := f.cache.Get(7); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached download never populated the cache")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got, err := f.bs.Get(context.Background(), c)
+	if err != nil {
+		t.Fatalf("Get after detached download: %v", err)
+	}
+	if !bytes.Equal(got.RawData(), block) {
+		t.Fatalf("payload mismatch: got %q want %q", got.RawData(), block)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if downloads != 1 {
+		t.Fatalf("want exactly one download, got %d", downloads)
+	}
+}
+
 func TestGetUnknownCID(t *testing.T) {
 	_, block, c, off := carFixture(t)
 	ref := model.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: int32(len(block))}

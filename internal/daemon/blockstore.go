@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -157,7 +158,7 @@ func (bs *Blockstore) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) 
 		return nil, err
 	}
 
-	path, err := bs.carPath(ctx, ref.CarID)
+	path, err := bs.carPath(ctx, ref.CarID, false)
 	if errors.Is(err, errCarUnavailable) || errors.Is(err, repo.ErrNotFound) {
 		return nil, ipld.ErrNotFound{Cid: c}
 	}
@@ -166,6 +167,20 @@ func (bs *Blockstore) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) 
 	}
 
 	data, err := carpack.ReadBlockAt(path, ref.Offset, ref.Length)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Raced with cache eviction: the path resolved above was deleted
+		// before we could open it. Retry once, forcing a fresh download
+		// (bypassing the stale cache entry).
+		log.Debug().Int64("car_id", ref.CarID).Msg("cached car evicted mid-read, re-downloading")
+		path, err = bs.carPath(ctx, ref.CarID, true)
+		if errors.Is(err, errCarUnavailable) || errors.Is(err, repo.ErrNotFound) {
+			return nil, ipld.ErrNotFound{Cid: c}
+		}
+		if err != nil {
+			return nil, err
+		}
+		data, err = carpack.ReadBlockAt(path, ref.Offset, ref.Length)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("daemon: read block %s from car %d: %w", c, ref.CarID, err)
 	}
@@ -174,23 +189,38 @@ func (bs *Blockstore) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) 
 
 // carPath returns the local path of the cached CAR, downloading it from
 // Telegram on cache miss. Concurrent requests for the same car share one
-// download via singleflight.
-func (bs *Blockstore) carPath(ctx context.Context, carID int64) (string, error) {
-	if path, ok := bs.cache.Get(carID); ok {
-		return path, nil
-	}
-	v, err, _ := bs.group.Do(fmt.Sprintf("%d", carID), func() (any, error) {
-		// Re-check: another flight may have populated the cache while this
-		// call was queued behind it.
+// download via singleflight. With force set, the cache lookup is bypassed and
+// the car is re-downloaded (used to recover from an eviction race).
+//
+// The download itself runs detached from the caller's context: once a CAR
+// transfer starts, cancelling one waiter must not fail the others (or waste
+// the transfer). Each caller still honors its own context while waiting.
+func (bs *Blockstore) carPath(ctx context.Context, carID int64, force bool) (string, error) {
+	if !force {
 		if path, ok := bs.cache.Get(carID); ok {
 			return path, nil
 		}
-		return bs.download(ctx, carID)
-	})
-	if err != nil {
-		return "", err
 	}
-	return v.(string), nil
+	dctx := context.WithoutCancel(ctx)
+	ch := bs.group.DoChan(fmt.Sprintf("%d", carID), func() (any, error) {
+		if !force {
+			// Re-check: another flight may have populated the cache while
+			// this call was queued behind it.
+			if path, ok := bs.cache.Get(carID); ok {
+				return path, nil
+			}
+		}
+		return bs.download(dctx, carID)
+	})
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Val.(string), nil
+	}
 }
 
 // download fetches the CAR from Telegram, stores it in the cache and returns

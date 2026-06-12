@@ -216,26 +216,34 @@ func (e *env) checkExistingCars(
 		if car.Status != model.CarPublished {
 			continue
 		}
-		checks[carID] = e.probeCarMessage(ctx, tr, car, chByID[car.ChannelID], bots, lc)
+		check, err := e.probeCarMessage(ctx, tr, car, chByID[car.ChannelID], bots, lc)
+		if err != nil {
+			return nil, nil, err
+		}
+		checks[carID] = check
 	}
 	return statuses, checks, nil
 }
 
 // probeCarMessage checks whether the car's Telegram message is alive, trying
 // bots until one succeeds or none remain. Flood-waited bots are marked in the
-// database and skipped.
+// database and skipped; when every eligible bot is merely flood-waited, the
+// probe waits for the earliest expiry and retries instead of misclassifying a
+// healthy car as no_bot_access (which would force a needless re-upload). The
+// returned error is non-nil only when the wait was interrupted (context
+// cancelled).
 func (e *env) probeCarMessage(
 	ctx context.Context, tr tg.Transport,
 	car model.Car, ch model.Channel,
 	bots []model.Bot, lc *selector.LoadCounter,
-) carCheck {
+) (carCheck, error) {
 	if car.MessageID == nil {
-		return checkNoAccess
+		return checkNoAccess, nil
 	}
 	members, err := e.Channels.MembersOf(ctx, car.ChannelID)
 	if err != nil {
 		log.Warn().Err(err).Int64("car_id", car.ID).Msg("не удалось получить членство ботов")
-		return checkNoAccess
+		return checkNoAccess, nil
 	}
 	fileIDs, err := e.Cars.FileIDs(ctx, car.ID)
 	if err != nil {
@@ -247,9 +255,20 @@ func (e *env) probeCarMessage(
 	for {
 		bot, _, err := selector.PickDownloadBot(time.Now(), remaining, members, fileIDs, lc)
 		if err != nil {
-			log.Warn().Int64("car_id", car.ID).
-				Msg("ни один бот не может проверить сообщение CAR'а — считаем no_bot_access")
-			return checkNoAccess
+			// All eligible bots may be temporarily flood-waited: wait the
+			// earliest expiry out and retry rather than declaring no access.
+			earliest := earliestRecovery(remaining, members, func(m model.BotChannel) bool {
+				return m.Member && m.CanRead
+			})
+			if earliest == nil {
+				log.Warn().Int64("car_id", car.ID).
+					Msg("ни один бот не может проверить сообщение CAR'а — считаем no_bot_access")
+				return checkNoAccess, nil
+			}
+			if werr := waitForFloodWait(ctx, *earliest); werr != nil {
+				return checkNoAccess, werr
+			}
+			continue
 		}
 
 		cerr := tr.CheckMessage(ctx, bot.Token, ch.TgID, *car.MessageID)
@@ -257,18 +276,20 @@ func (e *env) probeCarMessage(
 		switch {
 		case cerr == nil:
 			lc.Record(bot.ID)
-			return checkOK
+			return checkOK, nil
 		case errors.Is(cerr, tg.ErrMessageDeleted):
-			return checkDeleted
+			return checkDeleted, nil
 		case errors.Is(cerr, tg.ErrTooLarge):
-			return checkTooLarge
+			return checkTooLarge, nil
 		case errors.As(cerr, &fw):
 			lc.RecordError(bot.ID)
 			until := time.Now().Add(fw.RetryAfter)
 			if err := e.Bots.SetUnavailableUntil(ctx, bot.ID, until); err != nil {
 				log.Warn().Err(err).Msg("не удалось записать flood-wait")
 			}
-			remaining = removeBot(remaining, bot.ID)
+			// Keep the bot in the candidate list with its expiry recorded so
+			// the selector skips it now but can pick it again after the wait.
+			markUnavailable(remaining, bot.ID, until)
 		case errors.Is(cerr, tg.ErrNoAccess):
 			lc.RecordError(bot.ID)
 			remaining = removeBot(remaining, bot.ID)
@@ -277,6 +298,17 @@ func (e *env) probeCarMessage(
 			log.Warn().Err(cerr).Int64("car_id", car.ID).Str("bot", bot.Username).
 				Msg("ошибка проверки сообщения, пробуем другого бота")
 			remaining = removeBot(remaining, bot.ID)
+		}
+	}
+}
+
+// markUnavailable records the flood-wait expiry on the in-memory candidate
+// list so the selector skips the bot until it recovers.
+func markUnavailable(bots []model.Bot, botID int64, until time.Time) {
+	for i := range bots {
+		if bots[i].ID == botID {
+			bots[i].UnavailableUntil = &until
+			return
 		}
 	}
 }
@@ -376,11 +408,15 @@ func (e *env) uploadCar(
 		}
 		bot, err := selector.PickUploadBot(time.Now(), bots, members, lc)
 		if errors.Is(err, selector.ErrNoBotAvailable) {
-			earliest := earliestRecovery(bots, members)
+			earliest := earliestRecovery(bots, members, func(m model.BotChannel) bool {
+				return m.Member && m.CanPost
+			})
 			if earliest == nil {
 				return fmt.Errorf("нет доступных ботов для канала «%s»", ch.Title)
 			}
-			waitForFloodWait(*earliest)
+			if werr := waitForFloodWait(ctx, *earliest); werr != nil {
+				return werr
+			}
 			continue
 		}
 		if err != nil {
@@ -446,18 +482,18 @@ func (e *env) uploadCar(
 }
 
 // earliestRecovery returns the earliest flood-wait expiry among active bots
-// that are posting members of the channel, or nil when no such bot exists
+// whose channel membership satisfies eligible, or nil when no such bot exists
 // (i.e. waiting would never help).
-func earliestRecovery(bots []model.Bot, members []model.BotChannel) *time.Time {
-	canPost := make(map[int64]bool, len(members))
+func earliestRecovery(bots []model.Bot, members []model.BotChannel, eligible func(model.BotChannel) bool) *time.Time {
+	ok := make(map[int64]bool, len(members))
 	for _, m := range members {
-		if m.Member && m.CanPost {
-			canPost[m.BotID] = true
+		if eligible(m) {
+			ok[m.BotID] = true
 		}
 	}
 	var earliest *time.Time
 	for _, b := range bots {
-		if !b.Active || !canPost[b.ID] || b.UnavailableUntil == nil {
+		if !b.Active || !ok[b.ID] || b.UnavailableUntil == nil {
 			continue
 		}
 		if earliest == nil || b.UnavailableUntil.Before(*earliest) {
@@ -468,14 +504,21 @@ func earliestRecovery(bots []model.Bot, members []model.BotChannel) *time.Time {
 	return earliest
 }
 
-// waitForFloodWait sleeps until the given time, printing progress.
-func waitForFloodWait(until time.Time) {
+// waitForFloodWait sleeps until the given time, printing progress. It returns
+// the context error when cancelled mid-wait.
+func waitForFloodWait(ctx context.Context, until time.Time) error {
 	for {
 		remaining := time.Until(until)
 		if remaining <= 0 {
-			return
+			return nil
 		}
 		fmt.Fprintf(stdout, "все боты во flood-wait, ждём %d сек\n", int(remaining.Seconds())+1)
-		time.Sleep(min(remaining, 10*time.Second))
+		timer := time.NewTimer(min(remaining, 10*time.Second))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
