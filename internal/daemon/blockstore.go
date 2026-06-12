@@ -60,7 +60,7 @@ type cidSource interface {
 
 // blockIndex is the block-index subset of the store the blockstore reads.
 type blockIndex interface {
-	LookupBlock(ctx context.Context, cid []byte) (store.Block, error)
+	LookupBlock(ctx context.Context, cid []byte) (store.BlockRef, error)
 	cidSource
 }
 

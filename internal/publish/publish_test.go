@@ -14,6 +14,7 @@ import (
 	"github.com/multiformats/go-multihash"
 	"github.com/rs/zerolog"
 
+	"github.com/ulbwa/ipfsgram/internal/block"
 	"github.com/ulbwa/ipfsgram/internal/car"
 	"github.com/ulbwa/ipfsgram/internal/selector"
 	"github.com/ulbwa/ipfsgram/internal/store"
@@ -40,7 +41,7 @@ type fakeDB struct {
 	lockCalls     int
 	pending       int
 	published     int
-	inserted      []store.Block
+	inserted      []store.BlockRef
 	pinsCreated   int
 	pinName       string
 	incrementedCh []int64
@@ -52,10 +53,10 @@ func (d *fakeDB) ConfigInt64(context.Context, string) (int64, error) {
 func (d *fakeDB) ConfigFloat64(context.Context, string) (float64, error) {
 	return 0, store.ErrNotFound
 }
-func (d *fakeDB) ExistingBlocks(context.Context, [][]byte) (map[string]store.Block, error) {
-	return map[string]store.Block{}, nil
+func (d *fakeDB) ExistingBlocks(context.Context, [][]byte) (map[string]store.BlockRef, error) {
+	return map[string]store.BlockRef{}, nil
 }
-func (d *fakeDB) UpsertBlocks(_ context.Context, blocks []store.Block) error {
+func (d *fakeDB) UpsertBlocks(_ context.Context, blocks []store.BlockRef) error {
 	d.inserted = append(d.inserted, blocks...)
 	return nil
 }
@@ -145,7 +146,7 @@ func TestPublishHappyPath(t *testing.T) {
 	p.loads = selector.NewLoadCounter()
 
 	got, err := p.Publish(context.Background(), root, "myname",
-		[]RawBlock{{CID: blkCID, Data: []byte("hello")}})
+		[]block.Block{{CID: blkCID, Data: []byte("hello")}})
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
 	}

@@ -11,21 +11,21 @@ import (
 )
 
 // LookupBlock returns the block for the given CID, or ErrNotFound.
-func (s *Store) LookupBlock(ctx context.Context, cid []byte) (Block, error) {
-	var b Block
+func (s *Store) LookupBlock(ctx context.Context, cid []byte) (BlockRef, error) {
+	var b BlockRef
 	err := s.db.WithContext(ctx).Where("cid = ?", cid).Take(&b).Error
 	if err != nil {
-		return Block{}, notFound("lookup block", err)
+		return BlockRef{}, notFound("lookup block", err)
 	}
 	return b, nil
 }
 
 // ExistingBlocks returns the blocks that exist for the given CIDs, keyed by
 // string(cid). CIDs are looked up in batches.
-func (s *Store) ExistingBlocks(ctx context.Context, cids [][]byte) (map[string]Block, error) {
-	out := make(map[string]Block, len(cids))
+func (s *Store) ExistingBlocks(ctx context.Context, cids [][]byte) (map[string]BlockRef, error) {
+	out := make(map[string]BlockRef, len(cids))
 	err := chunk(cids, func(batch [][]byte) error {
-		var blocks []Block
+		var blocks []BlockRef
 		if err := s.db.WithContext(ctx).Where("cid IN ?", batch).Find(&blocks).Error; err != nil {
 			return fmt.Errorf("existing blocks: %w", err)
 		}
@@ -46,8 +46,8 @@ func (s *Store) ExistingBlocks(ctx context.Context, cids [][]byte) (map[string]B
 // brand-new blocks, for blocks moved during a re-upload, and for blocks whose
 // previous car row (and thus their block rows, via cascade) was deleted
 // between the dedup snapshot and this write.
-func (s *Store) UpsertBlocks(ctx context.Context, blocks []Block) error {
-	return chunk(blocks, func(batch []Block) error {
+func (s *Store) UpsertBlocks(ctx context.Context, blocks []BlockRef) error {
+	return chunk(blocks, func(batch []BlockRef) error {
 		err := s.db.WithContext(ctx).
 			Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "cid"}},
@@ -81,7 +81,7 @@ func (s *Store) StreamAllCIDs(ctx context.Context) (<-chan []byte, <-chan error)
 			}
 
 			q := s.db.WithContext(ctx).
-				Model(&Block{}).
+				Model(&BlockRef{}).
 				Select("cid").
 				Order("cid").
 				Limit(maxBatch)
@@ -120,7 +120,7 @@ func (s *Store) StreamAllCIDs(ctx context.Context) (<-chan []byte, <-chan error)
 // CountBlocks returns the total number of stored blocks.
 func (s *Store) CountBlocks(ctx context.Context) (int64, error) {
 	var n int64
-	if err := s.db.WithContext(ctx).Model(&Block{}).Count(&n).Error; err != nil {
+	if err := s.db.WithContext(ctx).Model(&BlockRef{}).Count(&n).Error; err != nil {
 		return 0, fmt.Errorf("count blocks: %w", err)
 	}
 	return n, nil

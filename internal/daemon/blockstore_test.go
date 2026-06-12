@@ -31,13 +31,13 @@ import (
 // --- fakes ---------------------------------------------------------------
 
 type fakeBlocks struct {
-	refs map[string]store.Block
+	refs map[string]store.BlockRef
 }
 
-func (f *fakeBlocks) LookupBlock(_ context.Context, c []byte) (store.Block, error) {
+func (f *fakeBlocks) LookupBlock(_ context.Context, c []byte) (store.BlockRef, error) {
 	b, ok := f.refs[string(c)]
 	if !ok {
-		return store.Block{}, store.ErrNotFound
+		return store.BlockRef{}, store.ErrNotFound
 	}
 	return b, nil
 }
@@ -205,7 +205,7 @@ type fixture struct {
 	cacheDir string
 }
 
-func newFixture(t *testing.T, b store.Block, c cid.Cid, cr store.Car, bots []store.Bot, tr transport) *fixture {
+func newFixture(t *testing.T, b store.BlockRef, c cid.Cid, cr store.Car, bots []store.Bot, tr transport) *fixture {
 	t.Helper()
 	cacheDir := t.TempDir()
 	lru, err := cache.NewLRU(cacheDir, 1<<20)
@@ -223,7 +223,7 @@ func newFixture(t *testing.T, b store.Block, c cid.Cid, cr store.Car, bots []sto
 	cars := &fakeCars{car: cr, fileIDs: map[int64]string{}}
 	botStore := &fakeBots{bots: bots}
 	bs := NewBlockstore(Deps{
-		Blocks:      &fakeBlocks{refs: map[string]store.Block{string(c.Bytes()): b}},
+		Blocks:      &fakeBlocks{refs: map[string]store.BlockRef{string(c.Bytes()): b}},
 		Cars:        cars,
 		Bots:        botStore,
 		Channels:    &fakeChannels{channel: store.Channel{ID: cr.ChannelID, TgID: -100123}, members: members},
@@ -239,7 +239,7 @@ func newFixture(t *testing.T, b store.Block, c cid.Cid, cr store.Car, bots []sto
 
 func TestGetCacheHit(t *testing.T) {
 	carBytes, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 
 	tr := &fakeTransport{download: func(string, int64, int64, string) (io.ReadCloser, string, error) {
@@ -267,7 +267,7 @@ func TestGetCacheHit(t *testing.T) {
 
 func TestGetMessageDeleted(t *testing.T) {
 	_, _, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	bots := []store.Bot{{ID: 1, Token: "t1", Active: true}}
 
@@ -287,7 +287,7 @@ func TestGetMessageDeleted(t *testing.T) {
 
 func TestGetNoAccess(t *testing.T) {
 	_, _, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	bots := []store.Bot{{ID: 1, Token: "t1", Active: true}}
 
@@ -310,7 +310,7 @@ func TestGetNoAccess(t *testing.T) {
 
 func TestGetStaleFileID(t *testing.T) {
 	carBytes, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	bots := []store.Bot{{ID: 1, Token: "t1", Active: true}}
 
@@ -350,7 +350,7 @@ func TestGetStaleFileID(t *testing.T) {
 
 func TestGetFloodWaitFailsOver(t *testing.T) {
 	carBytes, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	// Status no_bot_access: a successful download must lazily recover it.
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarNoBotAccess}
 	bots := []store.Bot{
@@ -404,7 +404,7 @@ func TestGetFloodWaitFailsOver(t *testing.T) {
 
 func TestGetRetriesAfterEviction(t *testing.T) {
 	carBytes, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	bots := []store.Bot{{ID: 1, Token: "t1", Active: true}}
 
@@ -451,7 +451,7 @@ func TestGetRetriesAfterEviction(t *testing.T) {
 
 func TestGetCallerCancelDoesNotAbortDownload(t *testing.T) {
 	carBytes, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	bots := []store.Bot{{ID: 1, Token: "t1", Active: true}}
 
@@ -513,7 +513,7 @@ func TestGetCallerCancelDoesNotAbortDownload(t *testing.T) {
 
 func TestGetUnknownCID(t *testing.T) {
 	_, block, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	cr := store.Car{ID: 7, ChannelID: 1, MessageID: msgID(42), Status: store.CarPublished}
 	f := newFixture(t, ref, c, cr, nil, &fakeTransport{})
 
@@ -537,7 +537,7 @@ func TestGetUnknownCID(t *testing.T) {
 
 func TestReadOnly(t *testing.T) {
 	_, _, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	f := newFixture(t, ref, c, store.Car{ID: 7, ChannelID: 1}, nil, &fakeTransport{})
 
 	if err := f.bs.Put(context.Background(), nil); !errors.Is(err, ErrReadOnly) {
@@ -553,7 +553,7 @@ func TestReadOnly(t *testing.T) {
 
 func TestAllKeysChan(t *testing.T) {
 	_, _, c, off, length := carFixture(t)
-	ref := store.Block{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
+	ref := store.BlockRef{CID: c.Bytes(), CarID: 7, Offset: off, Length: length}
 	f := newFixture(t, ref, c, store.Car{ID: 7, ChannelID: 1}, nil, &fakeTransport{})
 
 	ch, err := f.bs.AllKeysChan(context.Background())
@@ -569,7 +569,7 @@ func TestAllKeysChan(t *testing.T) {
 	}
 
 	// ProvideKeys mirrors AllKeysChan.
-	pch, err := ProvideKeys(&fakeBlocks{refs: map[string]store.Block{string(c.Bytes()): ref}})(context.Background())
+	pch, err := ProvideKeys(&fakeBlocks{refs: map[string]store.BlockRef{string(c.Bytes()): ref}})(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

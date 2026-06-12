@@ -1,7 +1,7 @@
-// File: internal/publish/source_test.go
-// Tests for the local-file UnixFS block source (LoadFile): single raw leaf,
+// File: internal/block/file_test.go
+// Tests for the local-file UnixFS block source (FromFile): single raw leaf,
 // multi-chunk layout, codecs, traversal order and import determinism.
-package publish
+package block
 
 import (
 	"bytes"
@@ -22,11 +22,11 @@ func writeTempFile(t *testing.T, data []byte) string {
 	return path
 }
 
-func TestLoadFileSmall(t *testing.T) {
+func TestFromFileSmall(t *testing.T) {
 	data := []byte("hello ipfsgram")
-	root, blocks, err := LoadFile(context.Background(), writeTempFile(t, data))
+	root, blocks, err := FromFile(context.Background(), writeTempFile(t, data))
 	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
+		t.Fatalf("FromFile: %v", err)
 	}
 	if len(blocks) != 1 {
 		t.Fatalf("len(blocks) = %d, want 1 (single raw leaf)", len(blocks))
@@ -45,15 +45,15 @@ func TestLoadFileSmall(t *testing.T) {
 	}
 }
 
-func TestLoadFileMultiChunk(t *testing.T) {
+func TestFromFileMultiChunk(t *testing.T) {
 	// 3 chunks of distinct content (identical chunks would dedup by CID).
 	data := make([]byte, chunkSize*2+100)
 	for i := range data {
 		data[i] = byte(i / chunkSize) // 0x00.. / 0x01.. / 0x02..
 	}
-	root, blocks, err := LoadFile(context.Background(), writeTempFile(t, data))
+	root, blocks, err := FromFile(context.Background(), writeTempFile(t, data))
 	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
+		t.Fatalf("FromFile: %v", err)
 	}
 	if len(blocks) != 4 { // root + 3 raw leaves
 		t.Fatalf("len(blocks) = %d, want 4", len(blocks))
@@ -76,7 +76,7 @@ func TestLoadFileMultiChunk(t *testing.T) {
 	}
 
 	// Determinism: the same content must produce the same root.
-	root2, _, err := LoadFile(context.Background(), writeTempFile(t, data))
+	root2, _, err := FromFile(context.Background(), writeTempFile(t, data))
 	if err != nil {
 		t.Fatal(err)
 	}

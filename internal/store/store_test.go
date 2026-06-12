@@ -126,7 +126,7 @@ func TestBlockDedup(t *testing.T) {
 	ctx := context.Background()
 	_, carID := newCar(t, s, 100)
 
-	blocks := []Block{
+	blocks := []BlockRef{
 		{CID: []byte("cid-a"), CarID: carID, Offset: 0, Length: 10},
 		{CID: []byte("cid-b"), CarID: carID, Offset: 10, Length: 20},
 	}
@@ -136,7 +136,7 @@ func TestBlockDedup(t *testing.T) {
 	// A conflicting upsert must not duplicate the row and must repoint it
 	// (ON CONFLICT DO UPDATE) — the publish path relies on this to recover
 	// blocks whose previous car row was deleted after the dedup snapshot.
-	dup := []Block{{CID: []byte("cid-a"), CarID: carID, Offset: 999, Length: 999}}
+	dup := []BlockRef{{CID: []byte("cid-a"), CarID: carID, Offset: 999, Length: 999}}
 	if err := s.UpsertBlocks(ctx, dup); err != nil {
 		t.Fatalf("UpsertBlocks[2]: %v", err)
 	}
@@ -170,12 +170,12 @@ func TestRepoint(t *testing.T) {
 	_, carID := newCar(t, s, 101)
 	_, carID2 := newCar(t, s, 102)
 
-	if err := s.UpsertBlocks(ctx, []Block{
+	if err := s.UpsertBlocks(ctx, []BlockRef{
 		{CID: []byte("rc-a"), CarID: carID, Offset: 1, Length: 2},
 	}); err != nil {
 		t.Fatalf("UpsertBlocks: %v", err)
 	}
-	if err := s.UpsertBlocks(ctx, []Block{
+	if err := s.UpsertBlocks(ctx, []BlockRef{
 		{CID: []byte("rc-a"), CarID: carID2, Offset: 7, Length: 8},
 	}); err != nil {
 		t.Fatalf("UpsertBlocks: %v", err)
@@ -195,10 +195,10 @@ func TestStreamAllCIDs(t *testing.T) {
 	_, carID := newCar(t, s, 103)
 
 	want := map[string]bool{}
-	var blocks []Block
+	var blocks []BlockRef
 	for i := 0; i < 2500; i++ {
 		cid := []byte("scid-" + string(rune('A'+i%26)) + "-" + itoa(i))
-		blocks = append(blocks, Block{CID: cid, CarID: carID, Offset: int64(i), Length: 1})
+		blocks = append(blocks, BlockRef{CID: cid, CarID: carID, Offset: int64(i), Length: 1})
 		want[string(cid)] = true
 	}
 	if err := s.UpsertBlocks(ctx, blocks); err != nil {
@@ -268,7 +268,7 @@ func TestUnpinnedCars(t *testing.T) {
 
 	root := []byte("root-1")
 	cid := []byte("blk-1")
-	if err := s.UpsertBlocks(ctx, []Block{
+	if err := s.UpsertBlocks(ctx, []BlockRef{
 		{CID: cid, CarID: carID, Offset: 0, Length: 1},
 	}); err != nil {
 		t.Fatalf("UpsertBlocks: %v", err)
@@ -421,7 +421,7 @@ func TestRemoveStatsAndOrphanPins(t *testing.T) {
 	channelID, carID := newCar(t, s, 108)
 
 	cid := []byte("os-blk")
-	if err := s.UpsertBlocks(ctx, []Block{
+	if err := s.UpsertBlocks(ctx, []BlockRef{
 		{CID: cid, CarID: carID, Offset: 0, Length: 1},
 	}); err != nil {
 		t.Fatalf("UpsertBlocks: %v", err)

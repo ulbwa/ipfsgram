@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/ulbwa/ipfsgram/internal/block"
 	"github.com/ulbwa/ipfsgram/internal/publish"
 )
 
@@ -38,7 +39,7 @@ func newAddCmd() *cobra.Command {
 
 			var (
 				root    cid.Cid
-				blocks  []publish.RawBlock
+				blocks  []block.Block
 				pinName = name
 			)
 			if cidArg != "" {
@@ -47,7 +48,7 @@ func newAddCmd() *cobra.Command {
 					return fmt.Errorf("invalid CID %q: %w", cidArg, err)
 				}
 				log.Info().Stringer("cid", root).Msg("fetching DAG from the IPFS network")
-				root, blocks, err = publish.FetchDAG(ctx, root)
+				root, blocks, err = block.FromNetwork(ctx, root)
 				if err != nil {
 					return err
 				}
@@ -55,7 +56,7 @@ func newAddCmd() *cobra.Command {
 					pinName = root.String()
 				}
 			} else {
-				root, blocks, err = publish.LoadFile(ctx, args[0])
+				root, blocks, err = block.FromFile(ctx, args[0])
 				if err != nil {
 					return err
 				}

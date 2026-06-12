@@ -85,17 +85,17 @@ type CarFileID struct {
 // TableName returns the table name for CarFileID.
 func (CarFileID) TableName() string { return "car_file_ids" }
 
-// Block is a stored block-location row: the binary CID and where its payload
+// BlockRef is a stored block-location row: the binary CID and where its payload
 // lives inside a CAR. Maps to "blocks".
-type Block struct {
+type BlockRef struct {
 	CID    []byte `gorm:"column:cid;primaryKey"` // binary CID (cid.Cid.Bytes())
 	CarID  int64  `gorm:"column:car_id"`
 	Offset int64  `gorm:"column:offset"` // "offset" is a reserved word
 	Length int32  `gorm:"column:length"`
 }
 
-// TableName returns the table name for Block.
-func (Block) TableName() string { return "blocks" }
+// TableName returns the table name for BlockRef.
+func (BlockRef) TableName() string { return "blocks" }
 
 // Pin is a pinned DAG root. Maps to "pins".
 type Pin struct {

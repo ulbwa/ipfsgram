@@ -19,7 +19,7 @@ func TestPlanDedup(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		existing   map[string]store.Block
+		existing   map[string]store.BlockRef
 		statuses   map[int64]store.CarStatus
 		checks     map[int64]carCheck
 		wantSkip   []string
@@ -29,7 +29,7 @@ func TestPlanDedup(t *testing.T) {
 	}{
 		{
 			name: "published+ok skips",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 1},
 				cidB: {CID: []byte(cidB), CarID: 1},
 			},
@@ -40,7 +40,7 @@ func TestPlanDedup(t *testing.T) {
 		},
 		{
 			name: "deleted message reuploads and deletes car",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 2},
 			},
 			statuses:   map[int64]store.CarStatus{2: store.CarPublished},
@@ -51,7 +51,7 @@ func TestPlanDedup(t *testing.T) {
 		},
 		{
 			name: "no_access marks status and reuploads",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 3},
 			},
 			statuses:   map[int64]store.CarStatus{3: store.CarPublished},
@@ -61,7 +61,7 @@ func TestPlanDedup(t *testing.T) {
 		},
 		{
 			name: "too_large marks status and reuploads",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 4},
 			},
 			statuses:   map[int64]store.CarStatus{4: store.CarPublished},
@@ -71,7 +71,7 @@ func TestPlanDedup(t *testing.T) {
 		},
 		{
 			name: "already-pending car reuploads without status change",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 5},
 			},
 			statuses:   map[int64]store.CarStatus{5: store.CarPending},
@@ -81,7 +81,7 @@ func TestPlanDedup(t *testing.T) {
 		},
 		{
 			name: "mixed: live skip, deleted reupload",
-			existing: map[string]store.Block{
+			existing: map[string]store.BlockRef{
 				cidA: {CID: []byte(cidA), CarID: 1},
 				cidC: {CID: []byte(cidC), CarID: 6},
 			},

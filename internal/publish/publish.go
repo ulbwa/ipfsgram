@@ -3,7 +3,7 @@
 // record the pin.
 
 // Package publish implements the content-publishing workflow (`ipfsgram add`):
-// loading a DAG (LoadFile / FetchDAG), deduplicating against already-stored
+// loading a DAG (block.FromFile / block.FromNetwork), deduplicating against already-stored
 // blocks (re-probing their Telegram messages), packing the remaining blocks
 // into size-capped CAR archives, uploading each to a channel via a bot, and
 // finally recording the pin. Its dependencies are consumer-side interfaces
@@ -24,6 +24,7 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/rs/zerolog"
 
+	"github.com/ulbwa/ipfsgram/internal/block"
 	"github.com/ulbwa/ipfsgram/internal/car"
 	"github.com/ulbwa/ipfsgram/internal/selector"
 	"github.com/ulbwa/ipfsgram/internal/store"
@@ -46,8 +47,8 @@ type database interface {
 	ConfigInt64(ctx context.Context, key string) (int64, error)
 	ConfigFloat64(ctx context.Context, key string) (float64, error)
 
-	ExistingBlocks(ctx context.Context, cids [][]byte) (map[string]store.Block, error)
-	UpsertBlocks(ctx context.Context, blocks []store.Block) error
+	ExistingBlocks(ctx context.Context, cids [][]byte) (map[string]store.BlockRef, error)
+	UpsertBlocks(ctx context.Context, blocks []store.BlockRef) error
 
 	Car(ctx context.Context, carID int64) (store.Car, error)
 	DeleteCar(ctx context.Context, carID int64) error
@@ -107,9 +108,9 @@ func New(db database, tr transport, log zerolog.Logger) *Publisher {
 // runs under the shared advisory lock so it is mutually excluded with garbage
 // collection but stays concurrent with other publishers.
 //
-// Memory note: the caller (LoadFile / FetchDAG) holds the whole DAG in memory
+// Memory note: the caller (block.FromFile / block.FromNetwork) holds the whole DAG in memory
 // (~ content size); documented on those functions.
-func (p *Publisher) Publish(ctx context.Context, root cid.Cid, name string, blocks []RawBlock) (cid.Cid, error) {
+func (p *Publisher) Publish(ctx context.Context, root cid.Cid, name string, blocks []block.Block) (cid.Cid, error) {
 	carMaxSize, err := p.configInt64(ctx, "car_max_size", defaultCarMaxSize)
 	if err != nil {
 		return cid.Undef, err
@@ -152,7 +153,7 @@ func (p *Publisher) Publish(ctx context.Context, root cid.Cid, name string, bloc
 			}
 		}
 
-		var toUpload []RawBlock
+		var toUpload []block.Block
 		for _, b := range blocks {
 			if !plan.Skip[string(b.CID.Bytes())] {
 				toUpload = append(toUpload, b)
@@ -198,7 +199,7 @@ func (p *Publisher) configFloat64(ctx context.Context, key string, def float64) 
 // checkExistingCars loads the cars referenced by the existing blocks and, for
 // published ones, probes their Telegram messages.
 func (p *Publisher) checkExistingCars(
-	ctx context.Context, existing map[string]store.Block,
+	ctx context.Context, existing map[string]store.BlockRef,
 ) (map[int64]store.CarStatus, map[int64]carCheck, error) {
 	carIDs := make(map[int64]bool)
 	for _, ref := range existing {
@@ -317,7 +318,7 @@ func (p *Publisher) probeCarMessage(
 // packAndUpload packs the blocks into rotating CAR files and publishes each of
 // them. Partial failure leaves pending car rows for `ipfsgram doctor`.
 func (p *Publisher) packAndUpload(
-	ctx context.Context, root cid.Cid, blocks []RawBlock,
+	ctx context.Context, root cid.Cid, blocks []block.Block,
 	carMaxSize int64, warnThreshold float64,
 ) error {
 	tmpDir, err := os.MkdirTemp("", "ipfsgram-add-")
@@ -447,9 +448,9 @@ func (p *Publisher) uploadCar(
 		// A single upsert covers every case: new blocks, blocks repointed from a
 		// still-existing car, and blocks whose previous car row was deleted
 		// (cascading away their block rows) after the dedup snapshot was taken.
-		refs := make([]store.Block, 0, len(pc.Blocks))
+		refs := make([]store.BlockRef, 0, len(pc.Blocks))
 		for _, b := range pc.Blocks {
-			refs = append(refs, store.Block{
+			refs = append(refs, store.BlockRef{
 				CID: b.CID.Bytes(), CarID: carID, Offset: b.Offset, Length: b.Length,
 			})
 		}

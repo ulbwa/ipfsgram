@@ -37,7 +37,7 @@ type dedupPlan struct {
 // checks holds the message-probe result for cars that were published. Pure
 // function: no I/O, unit-testable.
 func planDedup(
-	existing map[string]store.Block,
+	existing map[string]store.BlockRef,
 	statuses map[int64]store.CarStatus,
 	checks map[int64]carCheck,
 ) dedupPlan {
