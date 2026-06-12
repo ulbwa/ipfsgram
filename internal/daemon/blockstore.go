@@ -86,14 +86,14 @@ type channelStore interface {
 	ChannelMembers(ctx context.Context, channelID int64) ([]store.BotChannel, error)
 }
 
-// transport is the Telegram operation the blockstore needs. telegram.Client
+// transport is the Telegram operation the blockstore needs. *telegram.Client
 // satisfies it.
 type transport interface {
 	Download(ctx context.Context, token string, channelTgID, messageID int64, fileID string) (rc io.ReadCloser, freshFileID string, err error)
 }
 
 // Deps are the dependencies of the blockstore. The store fields are all
-// satisfied by a single *store.Store; Transport by telegram.Client. Now is
+// satisfied by a single *store.Store; Transport by *telegram.Client. Now is
 // optional and defaults to time.Now.
 type Deps struct {
 	Blocks    blockIndex
@@ -238,37 +238,30 @@ func (bs *Blockstore) carPath(ctx context.Context, carID int64, force bool) (str
 	}
 }
 
+// downloadJob holds the per-download candidate state mutated across retry
+// attempts: the bot list, the channel membership matrix and the known file_ids.
+type downloadJob struct {
+	car     store.Car
+	channel store.Channel
+	bots    []store.Bot
+	members []store.BotChannel
+	fileIDs map[int64]string
+}
+
 // download fetches the CAR from Telegram, stores it in the cache and returns the
 // cached path. It owns the full classified-error policy.
 func (bs *Blockstore) download(ctx context.Context, carID int64) (string, error) {
-	c, err := bs.deps.Cars.Car(ctx, carID)
+	job, err := bs.loadDownloadJob(ctx, carID)
 	if err != nil {
-		return "", err // includes store.ErrNotFound: car raced with deletion
+		return "", err
 	}
-	if c.MessageID == nil {
-		bs.log.Warn().Int64("car_id", carID).Msg("car has no message yet (pending upload), block unavailable")
+	if job == nil {
 		return "", errCarUnavailable
-	}
-	channel, err := bs.deps.Channels.ChannelByID(ctx, c.ChannelID)
-	if err != nil {
-		return "", err
-	}
-	bots, err := bs.deps.Bots.Bots(ctx)
-	if err != nil {
-		return "", err
-	}
-	members, err := bs.deps.Channels.ChannelMembers(ctx, c.ChannelID)
-	if err != nil {
-		return "", err
-	}
-	fileIDs, err := bs.deps.Cars.CarFileIDs(ctx, carID)
-	if err != nil {
-		return "", err
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < maxDownloadAttempts; attempt++ {
-		bot, fileID, err := selector.PickDownloadBot(bs.now(), bots, members, fileIDs, bs.loads)
+		bot, fileID, err := selector.PickDownloadBot(bs.now(), job.bots, job.members, job.fileIDs, bs.loads)
 		if err != nil {
 			if lastErr != nil {
 				return "", fmt.Errorf("daemon: download car %d: %w (last bot error: %w)", carID, err, lastErr)
@@ -277,85 +270,127 @@ func (bs *Blockstore) download(ctx context.Context, carID int64) (string, error)
 		}
 		bs.loads.Record(bot.ID)
 
-		rc, freshFileID, err := bs.deps.Transport.Download(ctx, bot.Token, channel.TgID, *c.MessageID, fileID)
-		if err == nil {
-			path, err := bs.store(ctx, c, bot, freshFileID, rc)
-			if err != nil {
-				return "", err
-			}
-			return path, nil
+		rc, freshFileID, derr := bs.deps.Transport.Download(ctx, bot.Token, job.channel.TgID, *job.car.MessageID, fileID)
+		if derr == nil {
+			return bs.store(ctx, job.car, bot, freshFileID, rc)
 		}
 
-		var flood *telegram.FloodWaitError
-		switch {
-		case errors.Is(err, telegram.ErrMessageDeleted):
-			bs.log.Warn().
-				Int64("car_id", carID).
-				Int64("channel_tg_id", channel.TgID).
-				Int64("message_id", *c.MessageID).
-				Msg("telegram message physically deleted, dropping car from database")
-			if derr := bs.deps.Cars.DeleteCar(ctx, carID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
-				return "", fmt.Errorf("daemon: delete car %d after message deletion: %w", carID, derr)
-			}
-			return "", errCarUnavailable
-
-		case errors.Is(err, telegram.ErrNoAccess):
-			bs.log.Warn().
-				Int64("car_id", carID).
-				Int64("channel_tg_id", channel.TgID).
-				Int64("bot_id", bot.ID).
-				Msg("no bot access to the car's channel, marking no_bot_access; data is intact and recoverable")
-			if serr := bs.deps.Cars.SetCarStatus(ctx, carID, store.CarNoBotAccess); serr != nil && !errors.Is(serr, store.ErrNotFound) {
-				return "", fmt.Errorf("daemon: mark car %d no_bot_access: %w", carID, serr)
-			}
-			return "", errCarUnavailable
-
-		case errors.Is(err, telegram.ErrTooLarge):
-			bs.log.Warn().
-				Int64("car_id", carID).
-				Int64("size", c.Size).
-				Msg("car exceeds the transport download limit, marking too_large; enable MTProto to lift the Bot API 20 MB limit")
-			if serr := bs.deps.Cars.SetCarStatus(ctx, carID, store.CarTooLarge); serr != nil && !errors.Is(serr, store.ErrNotFound) {
-				return "", fmt.Errorf("daemon: mark car %d too_large: %w", carID, serr)
-			}
-			return "", errCarUnavailable
-
-		case errors.As(err, &flood):
-			until := bs.now().Add(flood.RetryAfter)
-			bs.log.Warn().
-				Int64("bot_id", bot.ID).
-				Dur("retry_after", flood.RetryAfter).
-				Msg("bot flood-waited, trying the next eligible bot")
-			bs.loads.RecordError(bot.ID)
-			if serr := bs.deps.Bots.SetBotUnavailable(ctx, bot.ID, until); serr != nil {
-				bs.log.Error().Err(serr).Int64("bot_id", bot.ID).Msg("persist flood-wait")
-			}
-			markUnavailable(bots, bot.ID, until)
-			lastErr = err
-
-		case errors.Is(err, telegram.ErrBadFileID):
-			bs.log.Warn().
-				Int64("car_id", carID).
-				Int64("bot_id", bot.ID).
-				Msg("stale file_id, dropping it and retrying")
-			bs.loads.RecordError(bot.ID)
-			if derr := bs.deps.Cars.DeleteCarFileID(ctx, carID, bot.ID); derr != nil {
-				bs.log.Error().Err(derr).Int64("car_id", carID).Int64("bot_id", bot.ID).Msg("delete stale file_id")
-			}
-			delete(fileIDs, bot.ID)
-			lastErr = err
-
-		default:
-			bs.log.Warn().Err(err).
-				Int64("car_id", carID).
-				Int64("bot_id", bot.ID).
-				Msg("download failed, trying the next eligible bot")
-			bs.loads.RecordError(bot.ID)
-			bots = removeBot(bots, bot.ID)
-			lastErr = err
+		retry, cerr := bs.classifyDownloadError(ctx, job, bot, derr)
+		if !retry {
+			return "", cerr
 		}
+		lastErr = cerr
 	}
 	return "", fmt.Errorf("daemon: download car %d: attempts exhausted: %w", carID, lastErr)
+}
+
+// loadDownloadJob gathers the car, its channel, the bot list, the membership
+// matrix and the file_ids. It returns (nil, nil) when the car has no message yet
+// (unavailable but not an error to propagate up the stack as such).
+func (bs *Blockstore) loadDownloadJob(ctx context.Context, carID int64) (*downloadJob, error) {
+	c, err := bs.deps.Cars.Car(ctx, carID)
+	if err != nil {
+		return nil, err // includes store.ErrNotFound: car raced with deletion
+	}
+	if c.MessageID == nil {
+		bs.log.Warn().Int64("car_id", carID).Msg("car has no message yet (pending upload), block unavailable")
+		return nil, nil
+	}
+	channel, err := bs.deps.Channels.ChannelByID(ctx, c.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	bots, err := bs.deps.Bots.Bots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	members, err := bs.deps.Channels.ChannelMembers(ctx, c.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	fileIDs, err := bs.deps.Cars.CarFileIDs(ctx, carID)
+	if err != nil {
+		return nil, err
+	}
+	return &downloadJob{car: c, channel: channel, bots: bots, members: members, fileIDs: fileIDs}, nil
+}
+
+// classifyDownloadError applies the classified-error policy after a failed
+// Download. It returns retry=false with a terminal error (the car is gone or
+// marked unavailable, or a store write failed), or retry=true with the error to
+// remember as lastErr, having mutated job's candidate state to skip the bot.
+func (bs *Blockstore) classifyDownloadError(
+	ctx context.Context, job *downloadJob, bot store.Bot, err error,
+) (retry bool, terminal error) {
+	carID := job.car.ID
+	var flood *telegram.FloodWaitError
+	switch {
+	case errors.Is(err, telegram.ErrMessageDeleted):
+		bs.log.Warn().
+			Int64("car_id", carID).
+			Int64("channel_tg_id", job.channel.TgID).
+			Int64("message_id", *job.car.MessageID).
+			Msg("telegram message physically deleted, dropping car from database")
+		if derr := bs.deps.Cars.DeleteCar(ctx, carID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
+			return false, fmt.Errorf("daemon: delete car %d after message deletion: %w", carID, derr)
+		}
+		return false, errCarUnavailable
+
+	case errors.Is(err, telegram.ErrNoAccess):
+		bs.log.Warn().
+			Int64("car_id", carID).
+			Int64("channel_tg_id", job.channel.TgID).
+			Int64("bot_id", bot.ID).
+			Msg("no bot access to the car's channel, marking no_bot_access; data is intact and recoverable")
+		if serr := bs.deps.Cars.SetCarStatus(ctx, carID, store.CarNoBotAccess); serr != nil && !errors.Is(serr, store.ErrNotFound) {
+			return false, fmt.Errorf("daemon: mark car %d no_bot_access: %w", carID, serr)
+		}
+		return false, errCarUnavailable
+
+	case errors.Is(err, telegram.ErrTooLarge):
+		bs.log.Warn().
+			Int64("car_id", carID).
+			Int64("size", job.car.Size).
+			Msg("car exceeds the transport download limit, marking too_large; enable MTProto to lift the Bot API 20 MB limit")
+		if serr := bs.deps.Cars.SetCarStatus(ctx, carID, store.CarTooLarge); serr != nil && !errors.Is(serr, store.ErrNotFound) {
+			return false, fmt.Errorf("daemon: mark car %d too_large: %w", carID, serr)
+		}
+		return false, errCarUnavailable
+
+	case errors.As(err, &flood):
+		until := bs.now().Add(flood.RetryAfter)
+		bs.log.Warn().
+			Int64("bot_id", bot.ID).
+			Dur("retry_after", flood.RetryAfter).
+			Msg("bot flood-waited, trying the next eligible bot")
+		bs.loads.RecordError(bot.ID)
+		if serr := bs.deps.Bots.SetBotUnavailable(ctx, bot.ID, until); serr != nil {
+			bs.log.Error().Err(serr).Int64("bot_id", bot.ID).Msg("persist flood-wait")
+		}
+		markUnavailable(job.bots, bot.ID, until)
+		return true, err
+
+	case errors.Is(err, telegram.ErrBadFileID):
+		bs.log.Warn().
+			Int64("car_id", carID).
+			Int64("bot_id", bot.ID).
+			Msg("stale file_id, dropping it and retrying")
+		bs.loads.RecordError(bot.ID)
+		if derr := bs.deps.Cars.DeleteCarFileID(ctx, carID, bot.ID); derr != nil {
+			bs.log.Error().Err(derr).Int64("car_id", carID).Int64("bot_id", bot.ID).Msg("delete stale file_id")
+		}
+		delete(job.fileIDs, bot.ID)
+		return true, err
+
+	default:
+		bs.log.Warn().Err(err).
+			Int64("car_id", carID).
+			Int64("bot_id", bot.ID).
+			Msg("download failed, trying the next eligible bot")
+		bs.loads.RecordError(bot.ID)
+		job.bots = removeBot(job.bots, bot.ID)
+		return true, err
+	}
 }
 
 // store streams the downloaded CAR into the cache via a temp file and runs the
@@ -422,7 +457,7 @@ func (bs *Blockstore) AllKeysChan(ctx context.Context) (<-chan cid.Cid, error) {
 func (bs *Blockstore) HashOnRead(bool) {}
 
 // ProvideKeys builds the reprovider's KeyChanFunc from a CID source (satisfied
-// by *store.Store via StreamAllCIDs). NodeConfig.ProvideKeys expects exactly
+// by *store.Store via StreamAllCIDs). node.Config.ProvideKeys expects exactly
 // this signature.
 func ProvideKeys(src cidSource) provider.KeyChanFunc {
 	return func(ctx context.Context) (<-chan cid.Cid, error) {
