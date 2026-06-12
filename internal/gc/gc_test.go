@@ -1,7 +1,7 @@
 // gc_test.go — unit tests for garbage collection against fakes of the local
 // storage and transport interfaces.
 
-package maintain
+package gc
 
 import (
 	"context"

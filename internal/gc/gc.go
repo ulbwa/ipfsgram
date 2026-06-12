@@ -1,16 +1,50 @@
 // gc.go — garbage collection of unpinned CARs: the lock-free candidate
 // preview and the deletion pass under the exclusive advisory lock.
 
-package maintain
+// Package gc garbage-collects unpinned CARs (`ipfsgram gc`): a lock-free
+// GCCandidates step (so the caller can preview and confirm) and a GC step that
+// re-fetches and deletes under the exclusive advisory lock, removing each car's
+// Telegram message via a can_delete member bot and dropping its rows. The
+// narrow store/telegram interfaces it needs are declared here, on the consumer
+// side.
+package gc
 
 import (
 	"context"
 	"errors"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/ulbwa/ipfsgram/internal/store"
 	"github.com/ulbwa/ipfsgram/internal/telegram"
 )
+
+// storage is the subset of *store.Store garbage collection calls. *store.Store
+// satisfies it implicitly; tests substitute a fake.
+type storage interface {
+	UnpinnedCars(ctx context.Context) ([]store.Car, error)
+	Channels(ctx context.Context) ([]store.Channel, error)
+	Bots(ctx context.Context) ([]store.Bot, error)
+	ChannelMembers(ctx context.Context, channelID int64) ([]store.BotChannel, error)
+	SetBotUnavailable(ctx context.Context, id int64, until time.Time) error
+	DeleteCar(ctx context.Context, carID int64) error
+	WithExclusiveGCLock(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+// transport is the subset of the Telegram client garbage collection calls.
+// *telegram.Client satisfies it implicitly; tests substitute a fake.
+type transport interface {
+	DeleteMessage(ctx context.Context, token string, channelTgID, messageID int64) error
+}
+
+// Service performs garbage collection. Store is *store.Store and Transport a
+// telegram client in production.
+type Service struct {
+	Store     storage
+	Transport transport
+	Logger    zerolog.Logger
+}
 
 // GCCandidates returns the unpinned cars eligible for collection and their total
 // size. It takes no lock so the caller can preview and prompt without stalling

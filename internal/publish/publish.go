@@ -7,7 +7,7 @@
 // blocks (re-probing their Telegram messages), packing the remaining blocks
 // into size-capped CAR archives, uploading each to a channel via a bot, and
 // finally recording the pin. Its dependencies are consumer-side interfaces
-// declared in this package (satisfied by *store.Store and telegram.Client);
+// declared in this package (satisfied by *store.Store and *telegram.Client);
 // the bot/channel selection strategies are the pure functions of
 // internal/selector. All diagnostics go to a zerolog.Logger; user-facing text
 // is left to the caller via the returned root CID.
@@ -36,7 +36,7 @@ const (
 	defaultWarnThreshold = 0.9
 )
 
-// transport is the slice of telegram.Client the publish pipeline uses.
+// transport is the slice of *telegram.Client the publish pipeline uses.
 type transport interface {
 	Upload(ctx context.Context, token string, channelTgID int64, name string, size int64, r io.Reader) (telegram.UploadResult, error)
 	CheckMessage(ctx context.Context, token string, channelTgID, messageID int64) error
@@ -90,7 +90,7 @@ type Publisher struct {
 }
 
 // New returns a Publisher backed by the given store and Telegram transport.
-// *store.Store satisfies db; telegram.Client satisfies tr.
+// *store.Store satisfies db; *telegram.Client satisfies tr.
 func New(db database, tr transport, log zerolog.Logger) *Publisher {
 	return &Publisher{
 		db:    db,
@@ -286,33 +286,46 @@ func (p *Publisher) probeCarMessage(
 			continue
 		}
 
-		cerr := p.tr.CheckMessage(ctx, bot.Token, ch.TgID, *c.MessageID)
-		var fw *telegram.FloodWaitError
-		switch {
-		case cerr == nil:
-			p.loads.Record(bot.ID)
-			return checkOK, nil
-		case errors.Is(cerr, telegram.ErrMessageDeleted):
-			return checkDeleted, nil
-		case errors.Is(cerr, telegram.ErrTooLarge):
-			return checkTooLarge, nil
-		case errors.As(cerr, &fw):
-			p.loads.RecordError(bot.ID)
-			until := time.Now().Add(fw.RetryAfter)
-			if err := p.db.SetBotUnavailable(ctx, bot.ID, until); err != nil {
-				p.log.Warn().Err(err).Msg("could not record flood-wait")
-			}
-			markUnavailable(remaining, bot.ID, until)
-		case errors.Is(cerr, telegram.ErrNoAccess):
-			p.loads.RecordError(bot.ID)
-			remaining = removeBot(remaining, bot.ID)
-		default:
-			p.loads.RecordError(bot.ID)
-			p.log.Warn().Err(cerr).Int64("car_id", c.ID).Str("bot", bot.Username).
-				Msg("error checking message, trying another bot")
-			remaining = removeBot(remaining, bot.ID)
+		check, decided := p.checkWithBot(ctx, c, ch, bot, &remaining)
+		if decided {
+			return check, nil
 		}
 	}
+}
+
+// checkWithBot probes the car's message with one bot. It returns (check, true)
+// when the bot produced a conclusive result, or (_, false) to retry with
+// another bot — having marked the bot flood-waited or dropped it from remaining.
+func (p *Publisher) checkWithBot(
+	ctx context.Context, c store.Car, ch store.Channel, bot store.Bot, remaining *[]store.Bot,
+) (carCheck, bool) {
+	cerr := p.tr.CheckMessage(ctx, bot.Token, ch.TgID, *c.MessageID)
+	var fw *telegram.FloodWaitError
+	switch {
+	case cerr == nil:
+		p.loads.Record(bot.ID)
+		return checkOK, true
+	case errors.Is(cerr, telegram.ErrMessageDeleted):
+		return checkDeleted, true
+	case errors.Is(cerr, telegram.ErrTooLarge):
+		return checkTooLarge, true
+	case errors.As(cerr, &fw):
+		p.loads.RecordError(bot.ID)
+		until := time.Now().Add(fw.RetryAfter)
+		if err := p.db.SetBotUnavailable(ctx, bot.ID, until); err != nil {
+			p.log.Warn().Err(err).Msg("could not record flood-wait")
+		}
+		markUnavailable(*remaining, bot.ID, until)
+	case errors.Is(cerr, telegram.ErrNoAccess):
+		p.loads.RecordError(bot.ID)
+		*remaining = removeBot(*remaining, bot.ID)
+	default:
+		p.loads.RecordError(bot.ID)
+		p.log.Warn().Err(cerr).Int64("car_id", c.ID).Str("bot", bot.Username).
+			Msg("error checking message, trying another bot")
+		*remaining = removeBot(*remaining, bot.ID)
+	}
+	return 0, false
 }
 
 // packAndUpload packs the blocks into rotating CAR files and publishes each of
@@ -360,52 +373,26 @@ func (p *Publisher) packAndUpload(
 func (p *Publisher) uploadCar(
 	ctx context.Context, pc car.PackedCar, name string, warnThreshold float64,
 ) error {
-	channels, err := p.db.Channels(ctx)
+	ch, err := p.pickPublishChannel(ctx, warnThreshold)
 	if err != nil {
 		return err
-	}
-	ch, warn, err := selector.PickChannel(channels, warnThreshold)
-	if errors.Is(err, selector.ErrNoChannelSpace) {
-		return errors.New("no channel has free space: add a channel (ipfsgram channel add)")
-	}
-	if err != nil {
-		return err
-	}
-	if warn {
-		p.log.Warn().Str("channel", ch.Title).
-			Int64("count", ch.MessageCount).Int64("limit", ch.MessageLimit).
-			Msg("channel almost full")
 	}
 	members, err := p.db.ChannelMembers(ctx, ch.ID)
 	if err != nil {
 		return err
 	}
-
 	carID, err := p.db.CreatePendingCar(ctx, ch.ID, pc.Size, len(pc.Blocks))
 	if err != nil {
 		return err
 	}
 
 	for {
-		bots, err := p.db.Bots(ctx)
+		bot, err := p.pickUploadBot(ctx, ch, members)
 		if err != nil {
 			return err
 		}
-		bot, err := selector.PickUploadBot(time.Now(), bots, members, p.loads)
-		if errors.Is(err, selector.ErrNoBotAvailable) {
-			earliest := earliestRecovery(bots, members, func(m store.BotChannel) bool {
-				return m.Member && m.CanPost
-			})
-			if earliest == nil {
-				return fmt.Errorf("no bot available for channel %q", ch.Title)
-			}
-			if werr := p.waitForFloodWait(ctx, *earliest); werr != nil {
-				return werr
-			}
-			continue
-		}
-		if err != nil {
-			return err
+		if bot == nil {
+			continue // all bots flood-waited; we waited, now retry
 		}
 
 		f, err := os.Open(pc.Path)
@@ -416,7 +403,8 @@ func (p *Publisher) uploadCar(
 		f.Close()
 
 		var fw *telegram.FloodWaitError
-		if errors.As(uerr, &fw) {
+		switch {
+		case errors.As(uerr, &fw):
 			p.loads.RecordError(bot.ID)
 			until := time.Now().Add(fw.RetryAfter)
 			p.log.Warn().Str("bot", bot.Username).Dur("retry_after", fw.RetryAfter).
@@ -425,37 +413,96 @@ func (p *Publisher) uploadCar(
 				p.log.Warn().Err(err).Msg("could not record flood-wait")
 			}
 			continue
-		}
-		if uerr != nil {
+		case uerr != nil:
 			p.loads.RecordError(bot.ID)
 			// Pending car row stays; `ipfsgram doctor` cleans it up.
 			return fmt.Errorf("upload %s: %w", name, uerr)
 		}
 		p.loads.Record(bot.ID)
-
-		if err := p.db.MarkCarPublished(ctx, carID, res.MessageID); err != nil {
-			return err
-		}
-		if res.FileID != "" {
-			if err := p.db.UpsertCarFileID(ctx, carID, bot.ID, res.FileID); err != nil {
-				return err
-			}
-		}
-		if err := p.db.IncrementMessageCount(ctx, ch.ID); err != nil {
-			return err
-		}
-
-		// A single upsert covers every case: new blocks, blocks repointed from a
-		// still-existing car, and blocks whose previous car row was deleted
-		// (cascading away their block rows) after the dedup snapshot was taken.
-		refs := make([]store.BlockRef, 0, len(pc.Blocks))
-		for _, b := range pc.Blocks {
-			refs = append(refs, store.BlockRef{
-				CID: b.CID.Bytes(), CarID: carID, Offset: b.Offset, Length: b.Length,
-			})
-		}
-		return p.db.UpsertBlocks(ctx, refs)
+		return p.persistUpload(ctx, pc, ch, carID, *bot, res)
 	}
+}
+
+// pickPublishChannel selects the fill-first channel with free space, logging a
+// warning when it is near its limit. ErrNoChannelSpace is wrapped with the
+// "add a channel" guidance for the caller.
+func (p *Publisher) pickPublishChannel(ctx context.Context, warnThreshold float64) (store.Channel, error) {
+	channels, err := p.db.Channels(ctx)
+	if err != nil {
+		return store.Channel{}, err
+	}
+	ch, warn, err := selector.PickChannel(channels, warnThreshold)
+	if errors.Is(err, selector.ErrNoChannelSpace) {
+		return store.Channel{}, fmt.Errorf("%w: add a channel (ipfsgram channel add)", selector.ErrNoChannelSpace)
+	}
+	if err != nil {
+		return store.Channel{}, err
+	}
+	if warn {
+		p.log.Warn().Str("channel", ch.Title).
+			Int64("count", ch.MessageCount).Int64("limit", ch.MessageLimit).
+			Msg("channel almost full")
+	}
+	return ch, nil
+}
+
+// pickUploadBot selects the least-loaded healthy member bot for the channel.
+// When every eligible bot is merely flood-waited it waits for the earliest
+// expiry and returns (nil, nil) so the caller retries; it returns an error only
+// when no bot can ever serve the channel or the wait was interrupted.
+func (p *Publisher) pickUploadBot(ctx context.Context, ch store.Channel, members []store.BotChannel) (*store.Bot, error) {
+	bots, err := p.db.Bots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bot, err := selector.PickUploadBot(time.Now(), bots, members, p.loads)
+	if errors.Is(err, selector.ErrNoBotAvailable) {
+		earliest := earliestRecovery(bots, members, func(m store.BotChannel) bool {
+			return m.Member && m.CanPost
+		})
+		if earliest == nil {
+			return nil, fmt.Errorf("no bot available for channel %q", ch.Title)
+		}
+		if werr := p.waitForFloodWait(ctx, *earliest); werr != nil {
+			return nil, werr
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &bot, nil
+}
+
+// persistUpload records a successful upload: marks the car published, stores the
+// fresh file_id, increments the channel message count and upserts the block
+// rows.
+func (p *Publisher) persistUpload(
+	ctx context.Context, pc car.PackedCar, ch store.Channel, carID int64,
+	bot store.Bot, res telegram.UploadResult,
+) error {
+	if err := p.db.MarkCarPublished(ctx, carID, res.MessageID); err != nil {
+		return err
+	}
+	if res.FileID != "" {
+		if err := p.db.UpsertCarFileID(ctx, carID, bot.ID, res.FileID); err != nil {
+			return err
+		}
+	}
+	if err := p.db.IncrementMessageCount(ctx, ch.ID); err != nil {
+		return err
+	}
+
+	// A single upsert covers every case: new blocks, blocks repointed from a
+	// still-existing car, and blocks whose previous car row was deleted
+	// (cascading away their block rows) after the dedup snapshot was taken.
+	refs := make([]store.BlockRef, 0, len(pc.Blocks))
+	for _, b := range pc.Blocks {
+		refs = append(refs, store.BlockRef{
+			CID: b.CID.Bytes(), CarID: carID, Offset: b.Offset, Length: b.Length,
+		})
+	}
+	return p.db.UpsertBlocks(ctx, refs)
 }
 
 // waitForFloodWait sleeps until the given time, logging progress. It returns the

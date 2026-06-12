@@ -1,14 +1,44 @@
-// remove.go — impact computations and execution for `channel remove` and
-// `bot remove`: removal stats for confirmation prompts, the cascade plus
-// orphan-pin cleanup, and the optional purge of now-inaccessible car records.
+// remove.go — unpinning roots and the impact computations and execution for
+// `channel remove` and `bot remove`: removal stats for confirmation prompts,
+// the cascade plus orphan-pin cleanup, and the optional purge of
+// now-inaccessible car records.
 
-package maintain
+// Package remove implements IPFSgram's explicit removal workflows: unpinning a
+// root (`ipfsgram rm`), and the plan/execute split behind the `channel remove`
+// and `bot remove` confirmations (impact stats, the schema cascade with
+// orphan-pin cleanup, and the optional purge of now-inaccessible car records).
+// The narrow store interface it needs is declared here, on the consumer side.
+package remove
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ulbwa/ipfsgram/internal/store"
 )
+
+// storage is the subset of *store.Store the removal workflows call. *store.Store
+// satisfies it implicitly.
+type storage interface {
+	RemovePin(ctx context.Context, root []byte) error
+	ChannelRemoveStats(ctx context.Context, channelID int64) (pins int64, bytes int64, err error)
+	RemoveChannel(ctx context.Context, id int64) error
+	DeleteOrphanPins(ctx context.Context) (int64, error)
+	CarsAccessibleOnlyVia(ctx context.Context, botID int64) ([]store.Car, error)
+	RemoveBot(ctx context.Context, id int64) error
+	DeleteCar(ctx context.Context, carID int64) error
+}
+
+// Service performs explicit removals. Store is *store.Store in production.
+type Service struct {
+	Store storage
+}
+
+// Unpin removes the pin with the given root. store.ErrNotFound passes through
+// so the caller can report "pin not found".
+func (s *Service) Unpin(ctx context.Context, root []byte) error {
+	return s.Store.RemovePin(ctx, root)
+}
 
 // ChannelRemovePlan reports the impact of removing the channel, for the
 // caller's confirmation prompt: how many pins have at least one block stored
@@ -57,5 +87,10 @@ func (s *Service) BotRemoveExecute(ctx context.Context, botID int64) error {
 // drop the now-inaccessible records after a bot removal. store.ErrNotFound on
 // any row is tolerated (already removed).
 func (s *Service) PurgeCars(ctx context.Context, cars []store.Car) error {
-	return s.deleteCarRows(ctx, cars)
+	for _, c := range cars {
+		if err := s.Store.DeleteCar(ctx, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
 }
