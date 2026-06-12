@@ -91,26 +91,54 @@ ipfsgram mtproto status
 
 ## Architecture
 
-ipfsgram is organized as a small set of focused packages under `internal/`:
+ipfsgram is organized as a small set of focused packages, each with a single
+responsibility. Interfaces are declared by the consumer (small, 1–3 methods);
+provider packages export concrete types and sentinel errors.
 
-- **store** — the data-access layer: GORM models for the PostgreSQL schema and
-  a single `Store` type carrying every query. All database access goes through
-  it.
-- **telegram** — the Telegram clients: Bot API (official or self-hosted),
-  MTProto (no 20 MB download cap), and a hybrid that routes downloads through
-  MTProto when enabled.
-- **car** — CARv1 packing (size-capped, rotating) and reading.
+- **block** — load a DAG into blocks from a local file (UnixFS chunking) or the
+  IPFS network (a temporary lite node).
+- **car** — CARv1 packing (size-capped, rotating) and `ReadBlockAt` reading.
 - **cache** — the daemon's disk cache for downloaded CARs (`lru` and `ttl`
   strategies).
+- **store** — the data-access layer: GORM models for the PostgreSQL schema and a
+  single `Store` type carrying every query. All database access goes through it.
+- **telegram** — the Telegram clients: Bot API (official or self-hosted),
+  MTProto (no 20 MB download cap), and the concrete `Client` that routes
+  downloads/checks through MTProto when enabled. Owns the classified sentinels.
 - **selector** — the bot/channel selection strategies (least-loaded healthy
   bot, fill-first channel) and the in-memory load counter.
-- **publish** — the `add` workflow: load a DAG from a file or the IPFS
-  network, dedup against stored blocks, pack into CARs, upload, record the pin.
-- **maintain** — housekeeping: unpin, gc, the doctor's diagnostics, and the
-  impact plans behind `bot remove` / `channel remove`.
-- **daemon** — the IPFS node: libp2p + Bitswap + DHT serving blocks out of
-  Telegram through the disk cache.
+- **probe** — check whether a published CAR's Telegram message is still alive,
+  with flood-wait bookkeeping and bot failover. Shared by gc and doctor.
+- **publish** — the `add` workflow: load a DAG, dedup against stored blocks,
+  pack into CARs, upload, record the pin.
+- **gc** — garbage-collect unpinned CARs (`gc`): a lock-free candidate preview
+  and the deletion pass under the exclusive advisory lock.
+- **doctor** — the `doctor` diagnostics: orphaned pending CARs, membership
+  revalidation, and recovery of CARs marked unavailable (via probe).
+- **remove** — the explicit removal workflows: `rm` (unpin) and the
+  plan/execute split behind `bot remove` / `channel remove`.
+- **node** — the libp2p stack: host with a persisted identity, Bitswap, DHT and
+  the reprovider. No project-internal dependencies.
+- **daemon** — the read-only blockstore serving blocks out of Telegram through
+  the disk cache, plus the run loop assembling the cache, blockstore and node.
+- **db** — connect, migrate and the schema-version check (embedded dbmate
+  migrations).
 - **cmd/ipfsgram** — the cobra commands; thin wiring over the packages above.
+
+Who imports whom (acyclic; leaves first):
+
+```
+block, car, cache, telegram, db, selector     leaves (selector → store)
+store        → db
+probe        → store, telegram, selector
+publish      → store, telegram, selector, car, block
+gc           → store, telegram
+doctor       → store, telegram, selector, probe
+remove       → store
+node         → (no internal deps)
+daemon       → store, telegram, selector, car, cache, node
+cmd/ipfsgram → everything above
+```
 
 Persistence is GORM on top of a schema managed by
 [dbmate](https://github.com/amacneil/dbmate). The migrations are embedded in the
