@@ -110,18 +110,25 @@ func classifyBotAPIError(method string, resp *apiResponse) error {
 // redactToken вычищает токен бота из текста ошибки: транспортные ошибки
 // (*url.Error и ошибки парсинга URL) содержат полный URL запроса с
 // "/bot<token>/". Если токен в тексте не встречается, ошибка возвращается
-// как есть (сохраняя обёртки для errors.Is/As); иначе возвращается плоская
-// ошибка с замаскированным токеном — для транспортных ошибок классификация
-// не нужна.
+// как есть. Для *url.Error, у которого токен встречается только в поле URL,
+// токен маскируется прямо в этом поле — цепочка ошибок сохраняется
+// (errors.Is(err, context.Canceled) и т.п. продолжают работать). В остальных
+// случаях возвращается плоская ошибка с замаскированным токеном.
 func redactToken(token string, err error) error {
 	if err == nil || token == "" {
 		return err
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, token) {
+	if !strings.Contains(err.Error(), token) {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(msg, token, "<redacted>"))
+	var ue *url.Error
+	if errors.As(err, &ue) && strings.Contains(ue.URL, token) {
+		ue.URL = strings.ReplaceAll(ue.URL, token, "<redacted>")
+		if !strings.Contains(err.Error(), token) {
+			return err
+		}
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), token, "<redacted>"))
 }
 
 // do выполняет POST-запрос и декодирует конверт ответа; при ok=false
@@ -245,6 +252,8 @@ func (b *BotAPI) ProbeChannel(ctx context.Context, token string, channelTgID int
 
 // Upload публикует документ через sendDocument, стримя тело из r
 // (multipart через io.Pipe, без буферизации файла в памяти).
+// Параметр size не используется: multipart-стриминг Bot API не требует
+// знать размер файла заранее (в отличие от MTProto).
 func (b *BotAPI) Upload(ctx context.Context, token string, channelTgID int64, name string, _ int64, r io.Reader) (UploadResult, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)

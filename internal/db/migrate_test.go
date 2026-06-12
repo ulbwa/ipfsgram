@@ -3,26 +3,42 @@ package db
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"regexp"
 	"testing"
 )
 
 // testDSN returns the DSN for integration tests, skipping the test when the
-// IPFSGRAM_TEST_DSN environment variable is not set.
+// IPFSGRAM_TEST_DSN environment variable is not set. The database name from
+// the DSN gets a per-package "_db" suffix so this package and internal/repo
+// (which both reset the public schema) can run in parallel under
+// `go test ./...` without racing on a shared database.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("IPFSGRAM_TEST_DSN")
 	if dsn == "" {
 		t.Skip("IPFSGRAM_TEST_DSN is not set; skipping integration test")
 	}
-	return dsn
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse IPFSGRAM_TEST_DSN: %v", err)
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/ipfsgram_test"
+	}
+	u.Path += "_db"
+	return u.String()
 }
 
 // resetSchema drops and recreates the public schema so every test starts
-// from an empty database.
+// from an empty database. Migrate runs first because dbmate is what creates
+// the database when it does not exist yet (fresh Postgres server).
 func resetSchema(t *testing.T, dsn string) {
 	t.Helper()
+	if err := Migrate(dsn); err != nil {
+		t.Fatalf("initial migrate: %v", err)
+	}
 	conn, err := Connect(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)

@@ -136,9 +136,9 @@ func (r *CarRepo) OrphanPending(ctx context.Context, olderThan time.Duration) ([
 	err := r.db.SelectContext(ctx, &cars, `
 		SELECT id, channel_id, message_id, size, block_count, status
 		FROM cars
-		WHERE status = 'pending' AND created_at < now() - $1::interval
+		WHERE status = 'pending' AND created_at < now() - make_interval(secs => $1)
 		ORDER BY id`,
-		fmt.Sprintf("%f seconds", olderThan.Seconds()))
+		olderThan.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("orphan pending cars: %w", err)
 	}

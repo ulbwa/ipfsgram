@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"sync"
 	"testing"
@@ -17,7 +18,9 @@ import (
 
 // testDB connects to the database at IPFSGRAM_TEST_DSN, resets the public
 // schema and applies all migrations. Tests are skipped when the variable is
-// unset.
+// unset. The database name from the DSN gets a per-package "_repo" suffix so
+// this package and internal/db (which both reset the public schema) can run
+// in parallel under `go test ./...` without racing on a shared database.
 func testDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 
@@ -25,6 +28,15 @@ func testDB(t *testing.T) *sqlx.DB {
 	if dsn == "" {
 		t.Skip("IPFSGRAM_TEST_DSN not set; skipping repo integration tests")
 	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse IPFSGRAM_TEST_DSN: %v", err)
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/ipfsgram_test"
+	}
+	u.Path += "_repo"
+	dsn = u.String()
 
 	// Migrate first: dbmate creates the database if it does not exist yet.
 	if err := db.Migrate(dsn); err != nil {
