@@ -1,3 +1,6 @@
+// doctor.go — the `ipfsgram doctor` command: orphaned pending CARs, bot
+// membership revalidation and CAR recovery via internal/maintain.
+
 package main
 
 import (
@@ -5,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/service/maintenance"
+	"github.com/ulbwa/ipfsgram/internal/maintain"
 )
 
 // newDoctorCmd returns the top-level `ipfsgram doctor` command.
@@ -23,11 +26,11 @@ func newDoctorCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			svc := a.maintenanceService()
+			svc := a.maintainService()
 
 			// Phase 1: orphaned pending CARs.
 			fmt.Fprintln(stdout, "Phase 1: orphaned pending CARs")
-			orphans, err := svc.DoctorOrphans(ctx, maintenance.OrphanPendingAge)
+			orphans, err := svc.DoctorOrphans(ctx, maintain.OrphanPendingAge)
 			if err != nil {
 				return err
 			}

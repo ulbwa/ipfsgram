@@ -1,3 +1,6 @@
+// config.go — the `ipfsgram config` command group (whitelisted key/value
+// settings stored in the database) and the `ipfsgram status` overview.
+
 package main
 
 import (
@@ -11,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/domain"
+	"github.com/ulbwa/ipfsgram/internal/store"
 )
 
 // configValidators whitelists the user-editable config keys and validates their
@@ -88,8 +91,8 @@ func newConfigCmd() *cobra.Command {
 					return err
 				}
 				defer a.Close()
-				v, err := a.Config.Get(ctx, args[0])
-				if errors.Is(err, domain.ErrNotFound) {
+				v, err := a.Store.ConfigValue(ctx, args[0])
+				if errors.Is(err, store.ErrNotFound) {
 					return fmt.Errorf("key %q is not set", args[0])
 				}
 				if err != nil {
@@ -113,7 +116,7 @@ func newConfigCmd() *cobra.Command {
 					return err
 				}
 				defer a.Close()
-				if err := a.Config.Set(ctx, args[0], args[1]); err != nil {
+				if err := a.Store.SetConfig(ctx, args[0], args[1]); err != nil {
 					return err
 				}
 				fmt.Fprintf(stdout, "%s = %s\n", args[0], args[1])
@@ -138,14 +141,14 @@ func newStatusCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			warnThreshold, err := a.Config.GetFloat64(ctx, "channel_warn_threshold")
-			if errors.Is(err, domain.ErrNotFound) {
+			warnThreshold, err := a.Store.ConfigFloat64(ctx, "channel_warn_threshold")
+			if errors.Is(err, store.ErrNotFound) {
 				warnThreshold = 0.9
 			} else if err != nil {
 				return err
 			}
 
-			channels, err := a.Channels.List(ctx)
+			channels, err := a.Store.Channels(ctx)
 			if err != nil {
 				return err
 			}
@@ -163,7 +166,7 @@ func newStatusCmd() *cobra.Command {
 					ch.Title, ch.TgID, ch.MessageCount, ch.MessageLimit, fill*100, ch.Active, mark)
 			}
 
-			bots, err := a.Bots.List(ctx)
+			bots, err := a.Store.Bots(ctx)
 			if err != nil {
 				return err
 			}
@@ -176,17 +179,17 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(stdout, "  @%s (id %d) active=%t%s\n", b.Username, b.ID, b.Active, fw)
 			}
 
-			pins, err := a.Pins.Count(ctx)
+			pins, err := a.Store.CountPins(ctx)
 			if err != nil {
 				return err
 			}
-			blocks, err := a.Blocks.CountAll(ctx)
+			blocks, err := a.Store.CountBlocks(ctx)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(stdout, "Pins: %d\nBlocks: %d\n", pins, blocks)
 
-			counts, err := a.Cars.CountByStatus(ctx)
+			counts, err := a.Store.CountCarsByStatus(ctx)
 			if err != nil {
 				return err
 			}
@@ -197,7 +200,7 @@ func newStatusCmd() *cobra.Command {
 			sort.Strings(statuses)
 			fmt.Fprintln(stdout, "CARs by status:")
 			for _, st := range statuses {
-				fmt.Fprintf(stdout, "  %s: %d\n", st, counts[domain.CarStatus(st)])
+				fmt.Fprintf(stdout, "  %s: %d\n", st, counts[store.CarStatus(st)])
 			}
 			return nil
 		},

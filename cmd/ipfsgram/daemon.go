@@ -1,3 +1,7 @@
+// daemon.go — the `ipfsgram daemon` command: resolves flags and environment
+// fallbacks into a daemon.Config, opens the store, and hands off to
+// internal/daemon.Run.
+
 package main
 
 import (
@@ -8,13 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/adapter/diskcache"
-	"github.com/ulbwa/ipfsgram/internal/adapter/libp2pnode"
-	"github.com/ulbwa/ipfsgram/internal/port"
-	"github.com/ulbwa/ipfsgram/internal/service/blockstore"
+	"github.com/ulbwa/ipfsgram/internal/daemon"
 )
 
 // envPrefix prefixes the daemon's environment-variable fallbacks.
@@ -24,16 +24,6 @@ const envPrefix = "IPFSGRAM_"
 var defaultListen = []string{
 	"/ip4/0.0.0.0/tcp/4001",
 	"/ip4/0.0.0.0/udp/4001/quic-v1",
-}
-
-// daemonConfig carries the resolved daemon settings (flags + env fallbacks).
-type daemonConfig struct {
-	DataDir       string
-	CacheDir      string
-	CacheMaxBytes int64
-	CacheStrategy string // "lru" or "ttl"
-	CacheTTL      time.Duration
-	Listen        []string
 }
 
 // newDaemonCmd returns the `ipfsgram daemon` command.
@@ -47,7 +37,13 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd, cfg)
+			ctx := cmd.Context()
+			gdb, st, err := openStore(ctx, cmd)
+			if err != nil {
+				return err
+			}
+			defer closeDB(gdb)
+			return daemon.Run(ctx, cfg, st)
 		},
 	}
 
@@ -61,86 +57,10 @@ func newDaemonCmd() *cobra.Command {
 	return cmd
 }
 
-// runDaemon wires the cache, blockstore service and libp2p node, then blocks
-// until the context is cancelled (SIGINT/SIGTERM) and shuts down gracefully.
-func runDaemon(cmd *cobra.Command, cfg daemonConfig) error {
-	ctx := cmd.Context()
-
-	if cfg.CacheDir == "" {
-		cfg.CacheDir = filepath.Join(cfg.DataDir, "cache")
-	}
-
-	a, err := openApp(ctx, cmd, filepath.Join(cfg.DataDir, "mtproto-sessions"))
-	if err != nil {
-		return err
-	}
-	defer a.Close()
-
-	carCache, err := buildCache(cfg)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := carCache.Close(); err != nil {
-			log.Error().Err(err).Msg("close cache")
-		}
-	}()
-
-	bs := blockstore.New(blockstore.Deps{
-		Blocks:      a.Blocks,
-		Cars:        a.Cars,
-		Bots:        a.Bots,
-		Channels:    a.Channels,
-		Transport:   a.Transport,
-		Cache:       carCache,
-		Reader:      a.Reader,
-		Selector:    a.Selector,
-		Logger:      log.Logger,
-		CacheTmpDir: filepath.Join(cfg.CacheDir, "tmp"),
-	})
-
-	node, err := libp2pnode.New(ctx, libp2pnode.Config{
-		IdentityPath: filepath.Join(cfg.DataDir, "identity.key"),
-		ListenAddrs:  cfg.Listen,
-		Blockstore:   bs,
-		ProvideKeys:  blockstore.ProvideKeys(a.Blocks),
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := node.Close(); err != nil {
-			log.Error().Err(err).Msg("shutdown")
-		}
-	}()
-
-	logEvent := log.Info().Str("peer_id", node.Host.ID().String())
-	for _, addr := range node.Host.Addrs() {
-		logEvent = logEvent.Str("listen", addr.String())
-	}
-	logEvent.Msg("daemon started")
-
-	<-ctx.Done()
-	log.Info().Msg("shutting down")
-	return nil
-}
-
-// buildCache constructs the disk cache per the configured strategy.
-func buildCache(cfg daemonConfig) (port.Cache, error) {
-	switch cfg.CacheStrategy {
-	case "lru", "":
-		return diskcache.NewLRU(cfg.CacheDir, cfg.CacheMaxBytes)
-	case "ttl":
-		return diskcache.NewTTL(cfg.CacheDir, cfg.CacheTTL)
-	default:
-		return nil, fmt.Errorf("unknown cache strategy %q (want lru or ttl)", cfg.CacheStrategy)
-	}
-}
-
 // daemonConfigFromFlags resolves every setting as flag → environment → default.
-func daemonConfigFromFlags(cmd *cobra.Command) (daemonConfig, error) {
+func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	flags := cmd.Flags()
-	var cfg daemonConfig
+	var cfg daemon.Config
 
 	dataDir, _ := flags.GetString("data-dir")
 	if dataDir == "" {
@@ -149,7 +69,7 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemonConfig, error) {
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return daemonConfig{}, fmt.Errorf("resolve home directory: %w", err)
+			return daemon.Config{}, fmt.Errorf("resolve home directory: %w", err)
 		}
 		dataDir = filepath.Join(home, ".ipfsgram")
 	}
@@ -159,14 +79,14 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemonConfig, error) {
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = os.Getenv(envPrefix + "CACHE_DIR")
 	}
-	// Empty stays empty: runDaemon defaults it to <data-dir>/cache.
+	// Empty stays empty: daemon.Run defaults it to <data-dir>/cache.
 
 	cfg.CacheMaxBytes, _ = flags.GetInt64("cache-max-bytes")
 	if !flags.Changed("cache-max-bytes") {
 		if env := os.Getenv(envPrefix + "CACHE_MAX_BYTES"); env != "" {
 			v, err := strconv.ParseInt(env, 10, 64)
 			if err != nil {
-				return daemonConfig{}, fmt.Errorf("parse $%sCACHE_MAX_BYTES: %w", envPrefix, err)
+				return daemon.Config{}, fmt.Errorf("parse $%sCACHE_MAX_BYTES: %w", envPrefix, err)
 			}
 			cfg.CacheMaxBytes = v
 		} else {
@@ -187,7 +107,7 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemonConfig, error) {
 		if env := os.Getenv(envPrefix + "CACHE_TTL"); env != "" {
 			d, err := time.ParseDuration(env)
 			if err != nil {
-				return daemonConfig{}, fmt.Errorf("parse $%sCACHE_TTL: %w", envPrefix, err)
+				return daemon.Config{}, fmt.Errorf("parse $%sCACHE_TTL: %w", envPrefix, err)
 			}
 			cfg.CacheTTL = d
 		} else {

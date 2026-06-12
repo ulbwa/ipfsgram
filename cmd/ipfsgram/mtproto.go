@@ -1,3 +1,6 @@
+// mtproto.go — the `ipfsgram mtproto` command group: enable (validate
+// credentials before persisting), disable (keep credential history) and status.
+
 package main
 
 import (
@@ -6,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/adapter/telegram"
-	"github.com/ulbwa/ipfsgram/internal/domain"
+	"github.com/ulbwa/ipfsgram/internal/store"
+	"github.com/ulbwa/ipfsgram/internal/telegram"
 )
 
 // newMTProtoCmd returns the `ipfsgram mtproto` command group.
@@ -38,7 +41,7 @@ func newMTProtoEnableCmd() *cobra.Command {
 			defer a.Close()
 
 			if apiID == 0 || apiHash == "" {
-				latest, err := a.MTProto.Latest(ctx)
+				latest, err := a.Store.LatestMTProtoCreds(ctx)
 				if err != nil {
 					return err
 				}
@@ -60,10 +63,10 @@ func newMTProtoEnableCmd() *cobra.Command {
 			if err := telegram.NewMTProto(apiID, apiHash, "").ValidateCreds(ctx); err != nil {
 				return fmt.Errorf("credential validation failed, nothing saved: %w", err)
 			}
-			if err := a.MTProto.Activate(ctx, apiID, apiHash); err != nil {
+			if err := a.Store.ActivateMTProto(ctx, apiID, apiHash); err != nil {
 				return err
 			}
-			if err := a.Config.Set(ctx, "mtproto_enabled", "true"); err != nil {
+			if err := a.Store.SetConfig(ctx, "mtproto_enabled", "true"); err != nil {
 				return err
 			}
 			fmt.Fprintf(stdout, "MTProto enabled (api_id=%d)\n", apiID)
@@ -88,12 +91,12 @@ func newMTProtoDisableCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			// Deactivate clears the active flag; the row stays so Latest() can
-			// offer the credentials on the next enable.
-			if err := a.MTProto.Deactivate(ctx); err != nil {
+			// Deactivate clears the active flag; the row stays so
+			// LatestMTProtoCreds can offer the credentials on the next enable.
+			if err := a.Store.DeactivateMTProto(ctx); err != nil {
 				return err
 			}
-			if err := a.Config.Set(ctx, "mtproto_enabled", "false"); err != nil {
+			if err := a.Store.SetConfig(ctx, "mtproto_enabled", "false"); err != nil {
 				return err
 			}
 			fmt.Fprintln(stdout, "MTProto disabled, credentials kept in history")
@@ -115,11 +118,11 @@ func newMTProtoStatusCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			enabled, err := a.Config.GetBool(ctx, "mtproto_enabled")
-			if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			enabled, err := a.Store.ConfigBool(ctx, "mtproto_enabled")
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
-			active, err := a.MTProto.Active(ctx)
+			active, err := a.Store.ActiveMTProtoCreds(ctx)
 			if err != nil {
 				return err
 			}

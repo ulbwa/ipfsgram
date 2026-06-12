@@ -1,3 +1,6 @@
+// add.go — the `ipfsgram add` command: loads a DAG from a local file or the
+// IPFS network and publishes it through internal/publish.
+
 package main
 
 import (
@@ -9,9 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/adapter/blocksource"
-	"github.com/ulbwa/ipfsgram/internal/port"
-	"github.com/ulbwa/ipfsgram/internal/service/publish"
+	"github.com/ulbwa/ipfsgram/internal/publish"
 )
 
 // newAddCmd returns the top-level `ipfsgram add` command.
@@ -36,40 +37,35 @@ func newAddCmd() *cobra.Command {
 			defer a.Close()
 
 			var (
-				src     port.BlockSource
+				root    cid.Cid
+				blocks  []publish.RawBlock
 				pinName = name
 			)
 			if cidArg != "" {
-				root, err := cid.Decode(cidArg)
+				root, err = cid.Decode(cidArg)
 				if err != nil {
 					return fmt.Errorf("invalid CID %q: %w", cidArg, err)
 				}
 				log.Info().Stringer("cid", root).Msg("fetching DAG from the IPFS network")
-				src = blocksource.NewNetwork(root)
+				root, blocks, err = publish.FetchDAG(ctx, root)
+				if err != nil {
+					return err
+				}
 				if pinName == "" {
 					pinName = root.String()
 				}
 			} else {
-				src = blocksource.NewFile(args[0])
+				root, blocks, err = publish.LoadFile(ctx, args[0])
+				if err != nil {
+					return err
+				}
 				if pinName == "" {
 					pinName = filepath.Base(args[0])
 				}
 			}
 
-			svc := &publish.Service{
-				Config:    a.Config,
-				Blocks:    a.Blocks,
-				Cars:      a.Cars,
-				Channels:  a.Channels,
-				Bots:      a.Bots,
-				Pins:      a.Pins,
-				Transport: a.Transport,
-				Selector:  a.Selector,
-				Packer:    a.Packer,
-				Locker:    a.Locker,
-				Logger:    log.Logger,
-			}
-			root, err := svc.Publish(ctx, src, pinName)
+			p := publish.New(a.Store, a.Transport, log.Logger)
+			root, err = p.Publish(ctx, root, pinName, blocks)
 			if err != nil {
 				return err
 			}

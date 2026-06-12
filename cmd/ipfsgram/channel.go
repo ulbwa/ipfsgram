@@ -1,3 +1,6 @@
+// channel.go — the `ipfsgram channel` command group: add (probing every bot's
+// access), list, and removal backed by internal/maintain's plan/execute split.
+
 package main
 
 import (
@@ -9,8 +12,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/domain"
-	"github.com/ulbwa/ipfsgram/internal/port"
+	"github.com/ulbwa/ipfsgram/internal/store"
+	"github.com/ulbwa/ipfsgram/internal/telegram"
 )
 
 // defaultMessageLimit mirrors the channels.message_limit schema default.
@@ -43,13 +46,13 @@ func newChannelAddCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			if _, err := a.Channels.GetByTgID(ctx, tgID); err == nil {
+			if _, err := a.Store.ChannelByTgID(ctx, tgID); err == nil {
 				return fmt.Errorf("channel %d is already added", tgID)
-			} else if !errors.Is(err, domain.ErrNotFound) {
+			} else if !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
 
-			bots, err := a.Bots.List(ctx)
+			bots, err := a.Store.Bots(ctx)
 			if err != nil {
 				return err
 			}
@@ -57,17 +60,17 @@ func newChannelAddCmd() *cobra.Command {
 				return errors.New("add at least one bot first")
 			}
 
-			infos := make(map[int64]port.ChannelInfo, len(bots))
+			infos := make(map[int64]telegram.ChannelInfo, len(bots))
 			title := ""
 			members := 0
 			for _, b := range bots {
 				info, perr := a.Transport.ProbeChannel(ctx, b.Token, tgID)
 				if perr != nil {
-					if !errors.Is(perr, domain.ErrNoAccess) {
+					if !errors.Is(perr, telegram.ErrNoAccess) {
 						log.Warn().Err(perr).Str("bot", b.Username).
 							Msg("could not probe bot access to channel")
 					}
-					infos[b.ID] = port.ChannelInfo{}
+					infos[b.ID] = telegram.ChannelInfo{}
 					continue
 				}
 				infos[b.ID] = info
@@ -82,7 +85,7 @@ func newChannelAddCmd() *cobra.Command {
 				return fmt.Errorf("no bot has access to channel %d", tgID)
 			}
 
-			chID, err := a.Channels.Add(ctx, domain.Channel{
+			chID, err := a.Store.AddChannel(ctx, store.Channel{
 				TgID: tgID, Title: title,
 				MessageLimit: defaultMessageLimit, Active: true,
 			})
@@ -91,7 +94,7 @@ func newChannelAddCmd() *cobra.Command {
 			}
 			for _, b := range bots {
 				info := infos[b.ID]
-				if err := a.Channels.UpsertBotChannel(ctx, domain.BotChannel{
+				if err := a.Store.UpsertBotChannel(ctx, store.BotChannel{
 					BotID: b.ID, ChannelID: chID,
 					CanPost: info.CanPost, CanRead: info.CanRead, CanDelete: info.CanDelete,
 					Member: info.Member, VerifiedAt: time.Now(),
@@ -124,7 +127,7 @@ func newChannelListCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			channels, err := a.Channels.List(ctx)
+			channels, err := a.Store.Channels(ctx)
 			if err != nil {
 				return err
 			}
@@ -132,7 +135,7 @@ func newChannelListCmd() *cobra.Command {
 			fmt.Fprintf(stdout, "%-5s %-16s %-24s %-24s %-8s %s\n",
 				"ID", "TG_ID", "TITLE", "MESSAGES", "ACTIVE", "BOTS")
 			for _, ch := range channels {
-				members, err := a.Channels.MembersOf(ctx, ch.ID)
+				members, err := a.Store.ChannelMembers(ctx, ch.ID)
 				if err != nil {
 					return err
 				}
@@ -174,15 +177,17 @@ func newChannelRemoveCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			ch, err := a.Channels.GetByTgID(ctx, tgID)
-			if errors.Is(err, domain.ErrNotFound) {
+			ch, err := a.Store.ChannelByTgID(ctx, tgID)
+			if errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("channel %d not found", tgID)
 			}
 			if err != nil {
 				return err
 			}
 
-			pins, bytes, err := a.Channels.RemoveStats(ctx, ch.ID)
+			svc := a.maintainService()
+
+			pins, bytes, err := svc.ChannelRemovePlan(ctx, ch.ID)
 			if err != nil {
 				return err
 			}
@@ -194,12 +199,7 @@ func newChannelRemoveCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := a.Channels.Remove(ctx, ch.ID); err != nil {
-				return err
-			}
-			// The schema cascades cars/blocks/car_file_ids; pins whose blocks all
-			// lived in this channel are now empty — drop them.
-			if _, err := a.Channels.DeleteOrphanPins(ctx); err != nil {
+			if err := svc.ChannelRemoveExecute(ctx, ch.ID); err != nil {
 				return err
 			}
 

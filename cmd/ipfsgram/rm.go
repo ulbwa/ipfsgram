@@ -1,3 +1,6 @@
+// rm.go — the `ipfsgram rm` and `ipfsgram gc` commands plus the shared
+// maintain.Service constructor used by every maintenance-backed command.
+
 package main
 
 import (
@@ -8,20 +11,17 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/domain"
-	"github.com/ulbwa/ipfsgram/internal/service/maintenance"
+	"github.com/ulbwa/ipfsgram/internal/maintain"
+	"github.com/ulbwa/ipfsgram/internal/selector"
+	"github.com/ulbwa/ipfsgram/internal/store"
 )
 
-// maintenanceService builds a maintenance.Service from the app's ports.
-func (a *app) maintenanceService() *maintenance.Service {
-	return &maintenance.Service{
-		Cars:      a.Cars,
-		Channels:  a.Channels,
-		Bots:      a.Bots,
-		Pins:      a.Pins,
+// maintainService builds a maintain.Service from the app's store and transport.
+func (a *app) maintainService() *maintain.Service {
+	return &maintain.Service{
+		Store:     a.Store,
 		Transport: a.Transport,
-		Selector:  a.Selector,
-		Locker:    a.Locker,
+		Loads:     selector.NewLoadCounter(),
 		Logger:    log.Logger,
 	}
 }
@@ -44,8 +44,8 @@ func newRmCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			if err := a.maintenanceService().Unpin(ctx, c.Bytes()); err != nil {
-				if errors.Is(err, domain.ErrNotFound) {
+			if err := a.maintainService().Unpin(ctx, c.Bytes()); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
 					return errors.New("pin not found")
 				}
 				return err
@@ -71,7 +71,7 @@ func newGCCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			svc := a.maintenanceService()
+			svc := a.maintainService()
 
 			// Preview and prompt BEFORE GC takes the exclusive lock: an
 			// interactive prompt must not stall concurrent publishers.

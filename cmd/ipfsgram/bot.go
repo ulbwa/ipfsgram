@@ -1,3 +1,6 @@
+// bot.go — the `ipfsgram bot` command group: add (token validation + channel
+// probing), list, and the two-step removal flow backed by internal/maintain.
+
 package main
 
 import (
@@ -11,23 +14,23 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/ulbwa/ipfsgram/internal/domain"
-	"github.com/ulbwa/ipfsgram/internal/port"
+	"github.com/ulbwa/ipfsgram/internal/store"
+	"github.com/ulbwa/ipfsgram/internal/telegram"
 )
 
 // findBot resolves a bot by numeric ID or @username.
-func (a *app) findBot(ctx context.Context, arg string) (domain.Bot, error) {
+func (a *app) findBot(ctx context.Context, arg string) (store.Bot, error) {
 	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
-		b, err := a.Bots.GetByID(ctx, id)
-		if errors.Is(err, domain.ErrNotFound) {
-			return domain.Bot{}, fmt.Errorf("bot %q not found", arg)
+		b, err := a.Store.BotByID(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Bot{}, fmt.Errorf("bot %q not found", arg)
 		}
 		return b, err
 	}
 	username := strings.TrimPrefix(arg, "@")
-	b, err := a.Bots.GetByUsername(ctx, username)
-	if errors.Is(err, domain.ErrNotFound) {
-		return domain.Bot{}, fmt.Errorf("bot %q not found", arg)
+	b, err := a.Store.BotByUsername(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Bot{}, fmt.Errorf("bot %q not found", arg)
 	}
 	return b, err
 }
@@ -61,17 +64,17 @@ func newBotAddCmd() *cobra.Command {
 				return fmt.Errorf("invalid token: %w", err)
 			}
 
-			botID, err := a.Bots.Add(ctx, domain.Bot{
+			botID, err := a.Store.AddBot(ctx, store.Bot{
 				TgID: tgID, Username: username, Token: token, Active: true,
 			})
-			if errors.Is(err, domain.ErrBotExists) {
+			if errors.Is(err, store.ErrBotExists) {
 				return fmt.Errorf("bot @%s is already added", username)
 			}
 			if err != nil {
 				return err
 			}
 
-			channels, err := a.Channels.List(ctx)
+			channels, err := a.Store.Channels(ctx)
 			if err != nil {
 				return err
 			}
@@ -79,14 +82,14 @@ func newBotAddCmd() *cobra.Command {
 			for _, ch := range channels {
 				info, perr := a.Transport.ProbeChannel(ctx, token, ch.TgID)
 				if perr != nil {
-					if !errors.Is(perr, domain.ErrNoAccess) {
+					if !errors.Is(perr, telegram.ErrNoAccess) {
 						log.Warn().Err(perr).Int64("channel_tg_id", ch.TgID).
 							Msg("could not probe bot access to channel")
 						continue
 					}
-					info = port.ChannelInfo{} // no access: member=false
+					info = telegram.ChannelInfo{} // no access: member=false
 				}
-				if err := a.Channels.UpsertBotChannel(ctx, domain.BotChannel{
+				if err := a.Store.UpsertBotChannel(ctx, store.BotChannel{
 					BotID: botID, ChannelID: ch.ID,
 					CanPost: info.CanPost, CanRead: info.CanRead, CanDelete: info.CanDelete,
 					Member: info.Member, VerifiedAt: time.Now(),
@@ -117,7 +120,7 @@ func newBotListCmd() *cobra.Command {
 			}
 			defer a.Close()
 
-			bots, err := a.Bots.List(ctx)
+			bots, err := a.Store.Bots(ctx)
 			if err != nil {
 				return err
 			}
@@ -156,18 +159,16 @@ func newBotRemoveCmd() *cobra.Command {
 				return err
 			}
 
+			svc := a.maintainService()
+
 			// Cars that become unreachable: this bot is the last active member of
 			// their channel.
-			affected, err := a.Cars.AccessibleOnlyVia(ctx, bot.ID)
+			affected, total, err := svc.BotRemovePlan(ctx, bot.ID)
 			if err != nil {
 				return err
 			}
 
 			if len(affected) > 0 {
-				var total int64
-				for _, c := range affected {
-					total += c.Size
-				}
 				fmt.Fprintf(stdout, "%d CARs (%s) will become inaccessible\n",
 					len(affected), humanBytes(total))
 				if !yes && !Confirm(fmt.Sprintf("Remove bot @%s?", bot.Username)) {
@@ -176,7 +177,7 @@ func newBotRemoveCmd() *cobra.Command {
 				}
 			}
 
-			if err := a.Bots.Remove(ctx, bot.ID); err != nil {
+			if err := svc.BotRemoveExecute(ctx, bot.ID); err != nil {
 				return err
 			}
 			fmt.Fprintf(stdout, "Bot @%s removed\n", bot.Username)
@@ -184,10 +185,8 @@ func newBotRemoveCmd() *cobra.Command {
 			if len(affected) > 0 {
 				purge := yes || Confirm("Purge now-inaccessible records from DB? (otherwise they remain and recover if the bot returns)")
 				if purge {
-					for _, c := range affected {
-						if err := a.Cars.Delete(ctx, c.ID); err != nil && !errors.Is(err, domain.ErrNotFound) {
-							return err
-						}
+					if err := svc.PurgeCars(ctx, affected); err != nil {
+						return err
 					}
 					fmt.Fprintf(stdout, "Deleted %d CAR records\n", len(affected))
 				} else {
