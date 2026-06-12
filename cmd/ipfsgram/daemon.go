@@ -21,9 +21,16 @@ import (
 const envPrefix = "IPFSGRAM_"
 
 // defaultListen are the multiaddrs the node listens on when --listen is unset.
+// QUIC (UDP) is essential for NAT hole punching (DCUtR) behind CGNAT/double-NAT,
+// where TCP hole punching almost never succeeds; WebTransport additionally lets
+// browsers and some public gateways dial in. This mirrors Kubo's defaults.
 var defaultListen = []string{
 	"/ip4/0.0.0.0/tcp/4001",
 	"/ip4/0.0.0.0/udp/4001/quic-v1",
+	"/ip4/0.0.0.0/udp/4001/quic-v1/webtransport",
+	"/ip6/::/tcp/4001",
+	"/ip6/::/udp/4001/quic-v1",
+	"/ip6/::/udp/4001/quic-v1/webtransport",
 }
 
 // newDaemonCmd returns the `ipfsgram daemon` command.
