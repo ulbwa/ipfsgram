@@ -122,6 +122,16 @@ func (s *networkSource) Load(ctx context.Context) (cid.Cid, []domain.RawBlock, e
 	}
 	defer router.Close()
 
+	// Start the bitswap network before dialing anyone: the client's peer
+	// manager only learns about peers from connection events, so peers
+	// connected before Start would never receive our wantlist broadcasts.
+	bstore := blockstore.NewBlockstore(dssync.MutexWrap(datastore.NewMapDatastore()))
+	net := bsnet.NewFromIpfsHost(host)
+	bswap := bsclient.New(ctx, net, router, bstore)
+	net.Start(bswap)
+	defer net.Stop()
+	defer bswap.Close()
+
 	var wg sync.WaitGroup
 	for _, pi := range bootstrap {
 		wg.Add(1)
@@ -134,13 +144,6 @@ func (s *networkSource) Load(ctx context.Context) (cid.Cid, []domain.RawBlock, e
 	if err := router.Bootstrap(ctx); err != nil {
 		return cid.Undef, nil, fmt.Errorf("dht bootstrap: %w", err)
 	}
-
-	bstore := blockstore.NewBlockstore(dssync.MutexWrap(datastore.NewMapDatastore()))
-	net := bsnet.NewFromIpfsHost(host)
-	bswap := bsclient.New(ctx, net, router, bstore)
-	net.Start(bswap)
-	defer net.Stop()
-	defer bswap.Close()
 
 	bserv := blockservice.New(bstore, bswap)
 	defer bserv.Close()
