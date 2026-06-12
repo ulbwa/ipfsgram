@@ -17,4 +17,6 @@ var (
 	ErrMessageDeleted = errors.New("tg: message deleted")
 	ErrNoAccess       = errors.New("tg: bot has no access")
 	ErrTooLarge       = errors.New("tg: file exceeds transport download limit")
+	// ErrBadFileID — file_id протух или невалиден (Bot API: "wrong file_id").
+	ErrBadFileID = errors.New("tg: stale file_id")
 )
