@@ -101,6 +101,28 @@ func newAddCmd() *cobra.Command {
 				totalSize += int64(len(ent.data))
 			}
 
+			// Advisory-lock protocol vs `ipfsgram gc`: gc takes the lock in
+			// EXCLUSIVE mode while it deletes unpinned cars; add takes it in
+			// SHARED mode for its critical section — from the moment existing
+			// blocks are read (dedup decision) until the pin row exists.
+			// Otherwise gc could delete an unpinned car whose blocks add just
+			// decided to skip, leaving the new pin referencing vanished
+			// blocks. Shared locks don't block each other, so parallel adds
+			// stay concurrent; only gc is mutually excluded. The lock is
+			// transaction-scoped, so we hold a dedicated transaction open for
+			// the duration (the repos keep using the pool for their own
+			// statements — the lock only needs to be held, not shared).
+			// It is released automatically when the tx ends at process exit.
+			lockTx, err := e.db.BeginTxx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer lockTx.Rollback() //nolint:errcheck // releases the advisory lock
+			if _, err := lockTx.ExecContext(ctx,
+				`SELECT pg_advisory_xact_lock_shared($1)`, gcAdvisoryLockID); err != nil {
+				return fmt.Errorf("advisory lock: %w", err)
+			}
+
 			// 2. Dedup: which blocks already live in reachable published cars.
 			existing, err := e.Blocks.Existing(ctx, allCIDs)
 			if err != nil {

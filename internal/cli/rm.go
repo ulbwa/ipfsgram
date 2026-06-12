@@ -17,7 +17,9 @@ import (
 
 // gcAdvisoryLockID serializes concurrent `ipfsgram gc` runs (and protects
 // against races with parallel publishers) via a transaction-scoped advisory
-// lock.
+// lock. Protocol: gc takes it EXCLUSIVE; `ipfsgram add` takes it SHARED for
+// its dedup-through-pin critical section, so parallel adds stay concurrent
+// while gc excludes them all.
 const gcAdvisoryLockID = 496818465
 
 // newRmCmd returns the top-level `ipfsgram rm` command.
@@ -66,8 +68,9 @@ func newGCCmd() *cobra.Command {
 			defer e.Close()
 
 			// The advisory lock lives for the duration of this transaction,
-			// serializing gc against other gc runs while we delete messages
-			// and rows through the regular pool connections.
+			// serializing gc against other gc runs and against the shared
+			// lock held by `ipfsgram add` while we delete messages and rows
+			// through the regular pool connections.
 			tx, err := e.db.BeginTxx(ctx, nil)
 			if err != nil {
 				return err
