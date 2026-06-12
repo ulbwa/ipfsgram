@@ -389,24 +389,16 @@ func (s *Service) uploadCar(
 			return err
 		}
 
-		var newRefs, repointRefs []domain.Block
+		// A single upsert covers every case: new blocks, blocks repointed from a
+		// still-existing car, and blocks whose previous car row was deleted
+		// (cascading away their block rows) after the dedup snapshot was taken.
+		refs := make([]domain.Block, 0, len(pc.Blocks))
 		for _, b := range pc.Blocks {
-			ref := domain.Block{
+			refs = append(refs, domain.Block{
 				CID: b.CID.Bytes(), CarID: carID, Offset: b.Offset, Length: b.Length,
-			}
-			if _, ok := existing[string(ref.CID)]; ok {
-				repointRefs = append(repointRefs, ref)
-			} else {
-				newRefs = append(newRefs, ref)
-			}
+			})
 		}
-		if err := s.Blocks.InsertBatch(ctx, newRefs); err != nil {
-			return err
-		}
-		if err := s.Blocks.Repoint(ctx, repointRefs); err != nil {
-			return err
-		}
-		return nil
+		return s.Blocks.Upsert(ctx, refs)
 	}
 }
 

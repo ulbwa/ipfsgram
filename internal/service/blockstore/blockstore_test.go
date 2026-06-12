@@ -39,10 +39,7 @@ func (f *fakeBlocks) Lookup(_ context.Context, c []byte) (domain.Block, error) {
 func (f *fakeBlocks) Existing(context.Context, [][]byte) (map[string]domain.Block, error) {
 	panic("unexpected Existing")
 }
-func (f *fakeBlocks) InsertBatch(context.Context, []domain.Block) error {
-	panic("unexpected InsertBatch")
-}
-func (f *fakeBlocks) Repoint(context.Context, []domain.Block) error { panic("unexpected Repoint") }
+func (f *fakeBlocks) Upsert(context.Context, []domain.Block) error { panic("unexpected Upsert") }
 func (f *fakeBlocks) CountAll(context.Context) (int64, error)       { panic("unexpected CountAll") }
 
 func (f *fakeBlocks) StreamAllCIDs(ctx context.Context) (<-chan []byte, <-chan error) {

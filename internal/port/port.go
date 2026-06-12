@@ -97,11 +97,12 @@ type BlockRepository interface {
 	// Existing returns the blocks that exist for the given CIDs, keyed by
 	// string(cid).
 	Existing(ctx context.Context, cids [][]byte) (map[string]domain.Block, error)
-	// InsertBatch inserts blocks, skipping CIDs that already exist
-	// (ON CONFLICT(cid) DO NOTHING).
-	InsertBatch(ctx context.Context, blocks []domain.Block) error
-	// Repoint updates car_id/offset/length by CID for re-uploaded cars.
-	Repoint(ctx context.Context, blocks []domain.Block) error
+	// Upsert inserts blocks or, when a CID already exists, repoints it to the
+	// new car_id/offset/length (ON CONFLICT(cid) DO UPDATE). The single write
+	// primitive of the publish path: it is correct both for brand-new blocks
+	// and for re-uploaded ones, including blocks whose previous car row was
+	// deleted between the dedup snapshot and the write.
+	Upsert(ctx context.Context, blocks []domain.Block) error
 	// StreamAllCIDs streams every block CID in keyset-paginated batches. The CID
 	// channel is closed when the scan completes, fails, or ctx is done; any
 	// terminal error is delivered on the error channel. Used by AllKeysChan and

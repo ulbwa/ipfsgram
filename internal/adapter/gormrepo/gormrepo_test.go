@@ -133,21 +133,23 @@ func TestBlockDedup(t *testing.T) {
 		{CID: []byte("cid-a"), CarID: carID, Offset: 0, Length: 10},
 		{CID: []byte("cid-b"), CarID: carID, Offset: 10, Length: 20},
 	}
-	if err := r.InsertBatch(ctx, blocks); err != nil {
-		t.Fatalf("InsertBatch[1]: %v", err)
+	if err := r.Upsert(ctx, blocks); err != nil {
+		t.Fatalf("Upsert[1]: %v", err)
 	}
-	// Second insert with a conflicting offset must be a no-op (DO NOTHING).
+	// A conflicting upsert must not duplicate the row and must repoint it
+	// (ON CONFLICT DO UPDATE) — the publish path relies on this to recover
+	// blocks whose previous car row was deleted after the dedup snapshot.
 	dup := []domain.Block{{CID: []byte("cid-a"), CarID: carID, Offset: 999, Length: 999}}
-	if err := r.InsertBatch(ctx, dup); err != nil {
-		t.Fatalf("InsertBatch[2]: %v", err)
+	if err := r.Upsert(ctx, dup); err != nil {
+		t.Fatalf("Upsert[2]: %v", err)
 	}
 	n, err := r.CountAll(ctx)
 	if err != nil || n != 2 {
 		t.Fatalf("CountAll = %d, %v; want 2", n, err)
 	}
 	got, err := r.Lookup(ctx, []byte("cid-a"))
-	if err != nil || got.Offset != 0 {
-		t.Fatalf("Lookup cid-a = %+v, %v; want offset 0 (unchanged)", got, err)
+	if err != nil || got.Offset != 999 {
+		t.Fatalf("Lookup cid-a = %+v, %v; want offset 999 (repointed)", got, err)
 	}
 	if _, err := r.Lookup(ctx, []byte("nope")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("Lookup(nope) = %v, want ErrNotFound", err)
@@ -172,22 +174,22 @@ func TestRepoint(t *testing.T) {
 	_, carID2 := newCar(t, gdb, 102)
 	r := NewBlockRepository(gdb)
 
-	if err := r.InsertBatch(ctx, []domain.Block{
+	if err := r.Upsert(ctx, []domain.Block{
 		{CID: []byte("rc-a"), CarID: carID, Offset: 1, Length: 2},
 	}); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
+		t.Fatalf("Upsert: %v", err)
 	}
-	if err := r.Repoint(ctx, []domain.Block{
+	if err := r.Upsert(ctx, []domain.Block{
 		{CID: []byte("rc-a"), CarID: carID2, Offset: 7, Length: 8},
 	}); err != nil {
-		t.Fatalf("Repoint: %v", err)
+		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := r.Lookup(ctx, []byte("rc-a"))
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
 	if got.CarID != carID2 || got.Offset != 7 || got.Length != 8 {
-		t.Fatalf("Repoint result = %+v; want car=%d off=7 len=8", got, carID2)
+		t.Fatalf("Upsert result = %+v; want car=%d off=7 len=8", got, carID2)
 	}
 }
 
@@ -204,8 +206,8 @@ func TestStreamAllCIDs(t *testing.T) {
 		blocks = append(blocks, domain.Block{CID: cid, CarID: carID, Offset: int64(i), Length: 1})
 		want[string(cid)] = true
 	}
-	if err := r.InsertBatch(ctx, blocks); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
+	if err := r.Upsert(ctx, blocks); err != nil {
+		t.Fatalf("Upsert: %v", err)
 	}
 
 	cids, errc := r.StreamAllCIDs(ctx)
@@ -275,10 +277,10 @@ func TestUnpinnedCars(t *testing.T) {
 
 	root := []byte("root-1")
 	cid := []byte("blk-1")
-	if err := blocks.InsertBatch(ctx, []domain.Block{
+	if err := blocks.Upsert(ctx, []domain.Block{
 		{CID: cid, CarID: carID, Offset: 0, Length: 1},
 	}); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
+		t.Fatalf("Upsert: %v", err)
 	}
 
 	// Before pinning: the car is unpinned.
@@ -435,10 +437,10 @@ func TestRemoveStatsAndOrphanPins(t *testing.T) {
 	chans := NewChannelRepository(gdb)
 
 	cid := []byte("os-blk")
-	if err := blocks.InsertBatch(ctx, []domain.Block{
+	if err := blocks.Upsert(ctx, []domain.Block{
 		{CID: cid, CarID: carID, Offset: 0, Length: 1},
 	}); err != nil {
-		t.Fatalf("InsertBatch: %v", err)
+		t.Fatalf("Upsert: %v", err)
 	}
 	if err := pins.Create(ctx, []byte("os-root"), "n", 7, [][]byte{cid}); err != nil {
 		t.Fatalf("Create pin: %v", err)

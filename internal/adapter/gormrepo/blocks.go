@@ -53,45 +53,22 @@ func (r *BlockRepository) Existing(ctx context.Context, cids [][]byte) (map[stri
 	return out, nil
 }
 
-// InsertBatch inserts the given blocks, silently skipping CIDs that already
-// exist (ON CONFLICT(cid) DO NOTHING).
-func (r *BlockRepository) InsertBatch(ctx context.Context, blocks []domain.Block) error {
+// Upsert inserts the given blocks or, when a CID already exists, repoints it to
+// the new car_id/offset/length (ON CONFLICT(cid) DO UPDATE). This is the single
+// write primitive of the publish path: correct for brand-new blocks, for blocks
+// moved during a re-upload, and for blocks whose previous car row (and thus
+// their block rows, via cascade) was deleted between the dedup snapshot and
+// this write.
+func (r *BlockRepository) Upsert(ctx context.Context, blocks []domain.Block) error {
 	return chunk(blocks, func(batch []domain.Block) error {
 		err := r.gdb.WithContext(ctx).
 			Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "cid"}},
-				DoNothing: true,
+				DoUpdates: clause.AssignmentColumns([]string{"car_id", "offset", "length"}),
 			}).
 			Create(&batch).Error
 		if err != nil {
-			return fmt.Errorf("insert blocks: %w", err)
-		}
-		return nil
-	})
-}
-
-// Repoint updates the car_id/offset/length of existing blocks by CID, used when
-// a car is re-uploaded and its blocks move. Each batch runs as one transaction
-// of per-row updates keyed on cid.
-func (r *BlockRepository) Repoint(ctx context.Context, blocks []domain.Block) error {
-	return chunk(blocks, func(batch []domain.Block) error {
-		err := r.gdb.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			for _, b := range batch {
-				res := tx.Model(&domain.Block{}).
-					Where("cid = ?", b.CID).
-					Updates(map[string]any{
-						"car_id": b.CarID,
-						"offset": b.Offset,
-						"length": b.Length,
-					})
-				if res.Error != nil {
-					return res.Error
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("repoint blocks: %w", err)
+			return fmt.Errorf("upsert blocks: %w", err)
 		}
 		return nil
 	})

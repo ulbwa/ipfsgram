@@ -50,11 +50,10 @@ type fakeBlocks struct {
 func (b *fakeBlocks) Existing(context.Context, [][]byte) (map[string]domain.Block, error) {
 	return map[string]domain.Block{}, nil
 }
-func (b *fakeBlocks) InsertBatch(_ context.Context, blocks []domain.Block) error {
+func (b *fakeBlocks) Upsert(_ context.Context, blocks []domain.Block) error {
 	b.inserted = append(b.inserted, blocks...)
 	return nil
 }
-func (b *fakeBlocks) Repoint(context.Context, []domain.Block) error { return nil }
 
 type fakeCars struct {
 	port.CarRepository
