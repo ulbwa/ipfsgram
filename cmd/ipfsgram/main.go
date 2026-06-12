@@ -1,6 +1,6 @@
 // Command ipfsgram is the CLI and daemon for an IPFS blockstore backed by
 // Telegram channels. It wires the workflow packages (store, telegram, publish,
-// maintain, daemon) into cobra commands.
+// gc, doctor, remove, daemon, node) into cobra commands.
 package main
 
 import (

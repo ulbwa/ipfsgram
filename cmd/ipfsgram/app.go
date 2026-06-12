@@ -37,7 +37,7 @@ type app struct {
 	db *gorm.DB
 
 	Store     *store.Store
-	Transport telegram.Client
+	Transport *telegram.Client
 }
 
 // openStore resolves the DSN, connects to PostgreSQL, verifies the schema
@@ -80,7 +80,7 @@ func openApp(ctx context.Context, cmd *cobra.Command, sessionDir string) (*app, 
 
 // buildTransport assembles the Telegram transport from config: bot_api_url plus,
 // when mtproto_enabled, the active MTProto credentials.
-func (a *app) buildTransport(ctx context.Context, sessionDir string) (telegram.Client, error) {
+func (a *app) buildTransport(ctx context.Context, sessionDir string) (*telegram.Client, error) {
 	apiURL, err := a.Store.ConfigValue(ctx, "bot_api_url")
 	if errors.Is(err, store.ErrNotFound) {
 		apiURL = "https://api.telegram.org"

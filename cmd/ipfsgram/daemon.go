@@ -38,12 +38,12 @@ func newDaemonCmd() *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			gdb, st, err := openStore(ctx, cmd)
+			a, err := openApp(ctx, cmd, filepath.Join(cfg.DataDir, "mtproto-sessions"))
 			if err != nil {
 				return err
 			}
-			defer closeDB(gdb)
-			return daemon.Run(ctx, cfg, st)
+			defer a.Close()
+			return daemon.Run(ctx, cfg, a.Store, a.Transport)
 		},
 	}
 
@@ -57,15 +57,24 @@ func newDaemonCmd() *cobra.Command {
 	return cmd
 }
 
+// stringFlagOrEnv returns the string flag if set, else the matching
+// IPFSGRAM_<env> variable, else def.
+func stringFlagOrEnv(cmd *cobra.Command, flag, env, def string) string {
+	if v, _ := cmd.Flags().GetString(flag); v != "" {
+		return v
+	}
+	if v := os.Getenv(envPrefix + env); v != "" {
+		return v
+	}
+	return def
+}
+
 // daemonConfigFromFlags resolves every setting as flag → environment → default.
 func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	flags := cmd.Flags()
 	var cfg daemon.Config
 
-	dataDir, _ := flags.GetString("data-dir")
-	if dataDir == "" {
-		dataDir = os.Getenv(envPrefix + "DATA_DIR")
-	}
+	dataDir := stringFlagOrEnv(cmd, "data-dir", "DATA_DIR", "")
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -75,11 +84,9 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	}
 	cfg.DataDir = dataDir
 
-	cfg.CacheDir, _ = flags.GetString("cache-dir")
-	if cfg.CacheDir == "" {
-		cfg.CacheDir = os.Getenv(envPrefix + "CACHE_DIR")
-	}
-	// Empty stays empty: daemon.Run defaults it to <data-dir>/cache.
+	// Empty CacheDir stays empty: daemon.Run defaults it to <data-dir>/cache.
+	cfg.CacheDir = stringFlagOrEnv(cmd, "cache-dir", "CACHE_DIR", "")
+	cfg.CacheStrategy = stringFlagOrEnv(cmd, "cache-strategy", "CACHE_STRATEGY", "lru")
 
 	cfg.CacheMaxBytes, _ = flags.GetInt64("cache-max-bytes")
 	if !flags.Changed("cache-max-bytes") {
@@ -92,14 +99,6 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 		} else {
 			cfg.CacheMaxBytes = 1 << 30 // 1 GiB
 		}
-	}
-
-	cfg.CacheStrategy, _ = flags.GetString("cache-strategy")
-	if cfg.CacheStrategy == "" {
-		cfg.CacheStrategy = os.Getenv(envPrefix + "CACHE_STRATEGY")
-	}
-	if cfg.CacheStrategy == "" {
-		cfg.CacheStrategy = "lru"
 	}
 
 	cfg.CacheTTL, _ = flags.GetDuration("cache-ttl")
@@ -115,18 +114,25 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 		}
 	}
 
-	cfg.Listen, _ = flags.GetStringArray("listen")
-	if len(cfg.Listen) == 0 {
+	cfg.Listen = resolveListen(cmd)
+	return cfg, nil
+}
+
+// resolveListen resolves the libp2p listen multiaddrs as flag → comma-separated
+// environment → default.
+func resolveListen(cmd *cobra.Command) []string {
+	listen, _ := cmd.Flags().GetStringArray("listen")
+	if len(listen) == 0 {
 		if env := os.Getenv(envPrefix + "LISTEN"); env != "" {
 			for _, a := range strings.Split(env, ",") {
 				if a = strings.TrimSpace(a); a != "" {
-					cfg.Listen = append(cfg.Listen, a)
+					listen = append(listen, a)
 				}
 			}
 		}
 	}
-	if len(cfg.Listen) == 0 {
-		cfg.Listen = defaultListen
+	if len(listen) == 0 {
+		listen = defaultListen
 	}
-	return cfg, nil
+	return listen
 }

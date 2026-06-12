@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -133,76 +134,100 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "System status: channels, bots, counters",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			a, err := openApp(ctx, cmd, "")
-			if err != nil {
-				return err
-			}
-			defer a.Close()
-
-			warnThreshold, err := a.Store.ConfigFloat64(ctx, "channel_warn_threshold")
-			if errors.Is(err, store.ErrNotFound) {
-				warnThreshold = 0.9
-			} else if err != nil {
-				return err
-			}
-
-			channels, err := a.Store.Channels(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(stdout, "Channels:")
-			for _, ch := range channels {
-				fill := 0.0
-				if ch.MessageLimit > 0 {
-					fill = float64(ch.MessageCount) / float64(ch.MessageLimit)
-				}
-				mark := ""
-				if fill >= warnThreshold {
-					mark = " [!]"
-				}
-				fmt.Fprintf(stdout, "  %s (tg_id %d): %d/%d (%.1f%%) active=%t%s\n",
-					ch.Title, ch.TgID, ch.MessageCount, ch.MessageLimit, fill*100, ch.Active, mark)
-			}
-
-			bots, err := a.Store.Bots(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(stdout, "Bots:")
-			for _, b := range bots {
-				fw := ""
-				if b.UnavailableUntil != nil && time.Now().Before(*b.UnavailableUntil) {
-					fw = " flood-wait until " + b.UnavailableUntil.Format(time.RFC3339)
-				}
-				fmt.Fprintf(stdout, "  @%s (id %d) active=%t%s\n", b.Username, b.ID, b.Active, fw)
-			}
-
-			pins, err := a.Store.CountPins(ctx)
-			if err != nil {
-				return err
-			}
-			blocks, err := a.Store.CountBlocks(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(stdout, "Pins: %d\nBlocks: %d\n", pins, blocks)
-
-			counts, err := a.Store.CountCarsByStatus(ctx)
-			if err != nil {
-				return err
-			}
-			statuses := make([]string, 0, len(counts))
-			for st := range counts {
-				statuses = append(statuses, string(st))
-			}
-			sort.Strings(statuses)
-			fmt.Fprintln(stdout, "CARs by status:")
-			for _, st := range statuses {
-				fmt.Fprintf(stdout, "  %s: %d\n", st, counts[store.CarStatus(st)])
-			}
-			return nil
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runStatus(cmd)
 		},
 	}
+}
+
+// runStatus prints channels, bots and the pin/block/CAR counters.
+func runStatus(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	a, err := openApp(ctx, cmd, "")
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+
+	if err := a.printChannelStatus(ctx); err != nil {
+		return err
+	}
+	if err := a.printBotStatus(ctx); err != nil {
+		return err
+	}
+	return a.printCounters(ctx)
+}
+
+// printChannelStatus prints each channel's fill level, flagging those at or over
+// the warn threshold.
+func (a *app) printChannelStatus(ctx context.Context) error {
+	warnThreshold, err := a.Store.ConfigFloat64(ctx, "channel_warn_threshold")
+	if errors.Is(err, store.ErrNotFound) {
+		warnThreshold = 0.9
+	} else if err != nil {
+		return err
+	}
+	channels, err := a.Store.Channels(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "Channels:")
+	for _, ch := range channels {
+		fill := 0.0
+		if ch.MessageLimit > 0 {
+			fill = float64(ch.MessageCount) / float64(ch.MessageLimit)
+		}
+		mark := ""
+		if fill >= warnThreshold {
+			mark = " [!]"
+		}
+		fmt.Fprintf(stdout, "  %s (tg_id %d): %d/%d (%.1f%%) active=%t%s\n",
+			ch.Title, ch.TgID, ch.MessageCount, ch.MessageLimit, fill*100, ch.Active, mark)
+	}
+	return nil
+}
+
+// printBotStatus prints each bot with its active flag and flood-wait window.
+func (a *app) printBotStatus(ctx context.Context) error {
+	bots, err := a.Store.Bots(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "Bots:")
+	for _, b := range bots {
+		fw := ""
+		if b.UnavailableUntil != nil && time.Now().Before(*b.UnavailableUntil) {
+			fw = " flood-wait until " + b.UnavailableUntil.Format(time.RFC3339)
+		}
+		fmt.Fprintf(stdout, "  @%s (id %d) active=%t%s\n", b.Username, b.ID, b.Active, fw)
+	}
+	return nil
+}
+
+// printCounters prints the pin, block and per-status CAR counters.
+func (a *app) printCounters(ctx context.Context) error {
+	pins, err := a.Store.CountPins(ctx)
+	if err != nil {
+		return err
+	}
+	blocks, err := a.Store.CountBlocks(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Pins: %d\nBlocks: %d\n", pins, blocks)
+
+	counts, err := a.Store.CountCarsByStatus(ctx)
+	if err != nil {
+		return err
+	}
+	statuses := make([]string, 0, len(counts))
+	for st := range counts {
+		statuses = append(statuses, string(st))
+	}
+	sort.Strings(statuses)
+	fmt.Fprintln(stdout, "CARs by status:")
+	for _, st := range statuses {
+		fmt.Fprintf(stdout, "  %s: %d\n", st, counts[store.CarStatus(st)])
+	}
+	return nil
 }
