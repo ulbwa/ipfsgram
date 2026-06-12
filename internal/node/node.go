@@ -23,7 +23,13 @@ import (
 	dssync "github.com/ipfs/go-datastore/sync"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
+	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/rs/zerolog/log"
 )
 
 // Config configures a Node.
@@ -66,27 +72,74 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		return nil, err
 	}
 
+	// kadDHT is constructed inside the libp2p.Routing hook (so AutoRelay can use
+	// it as a peer source) and captured here for Bitswap and the reprovider.
+	var kadDHT *dht.IpfsDHT
+
+	// relayPeerSource feeds AutoRelay candidate relays discovered through the
+	// DHT routing table, so a NAT'd node can obtain a public relay address when
+	// neither UPnP nor hole punching yields a directly dialable address.
+	relayPeerSource := func(ctx context.Context, num int) <-chan peer.AddrInfo {
+		out := make(chan peer.AddrInfo)
+		go func() {
+			defer close(out)
+			if kadDHT == nil {
+				return
+			}
+			peers := kadDHT.RoutingTable().ListPeers()
+			sent := 0
+			for _, p := range peers {
+				if sent >= num {
+					return
+				}
+				addrs := kadDHT.Host().Peerstore().Addrs(p)
+				if len(addrs) == 0 {
+					continue
+				}
+				select {
+				case out <- peer.AddrInfo{ID: p, Addrs: addrs}:
+					sent++
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return out
+	}
+
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrStrings(cfg.ListenAddrs...),
+		// NAT traversal so a node behind a home router is reachable from other
+		// networks and public gateways: map the port via UPnP/NAT-PMP, run the
+		// AutoNAT service, hole-punch (DCUtR), and fall back to circuit relays.
+		libp2p.NATPortMap(),
+		libp2p.EnableNATService(),
+		libp2p.EnableHolePunching(),
+		libp2p.EnableAutoRelayWithPeerSource(relayPeerSource, autorelay.WithMinInterval(0)),
+		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+			d, derr := dht.New(ctx, h,
+				dht.Mode(dht.ModeServer),
+				dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...),
+			)
+			kadDHT = d
+			return d, derr
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("node: start libp2p host: %w", err)
 	}
-
-	kadDHT, err := dht.New(ctx, h,
-		dht.Mode(dht.ModeServer),
-		dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...),
-	)
-	if err != nil {
+	if kadDHT == nil {
 		h.Close()
-		return nil, fmt.Errorf("node: start dht: %w", err)
+		return nil, errors.New("node: dht was not initialised")
 	}
 	if err := kadDHT.Bootstrap(ctx); err != nil {
 		kadDHT.Close()
 		h.Close()
 		return nil, fmt.Errorf("node: bootstrap dht: %w", err)
 	}
+
+	logReachability(h)
 
 	bswap := bitswap.New(ctx, bsnet.NewFromIpfsHost(h), kadDHT, cfg.Blockstore)
 
@@ -105,6 +158,42 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	return &Node{Host: h, DHT: kadDHT, Bitswap: bswap, Provider: prov}, nil
+}
+
+// logReachability subscribes to the host event bus and logs NAT-reachability
+// changes and externally-visible (public/relay) addresses, so an operator can
+// tell whether the node became dialable from other networks. The goroutine
+// exits when the subscription closes (on host shutdown).
+func logReachability(h host.Host) {
+	sub, err := h.EventBus().Subscribe([]any{
+		new(event.EvtLocalReachabilityChanged),
+		new(event.EvtLocalAddressesUpdated),
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("subscribe to reachability events")
+		return
+	}
+	go func() {
+		defer sub.Close()
+		for e := range sub.Out() {
+			switch ev := e.(type) {
+			case event.EvtLocalReachabilityChanged:
+				log.Info().Str("reachability", ev.Reachability.String()).
+					Msg("nat reachability changed")
+			case event.EvtLocalAddressesUpdated:
+				var public []string
+				for _, ua := range ev.Current {
+					if a := ua.Address; a != nil && !manet.IsPrivateAddr(a) {
+						public = append(public, a.String())
+					}
+				}
+				if len(public) > 0 {
+					log.Info().Strs("addrs", public).
+						Msg("externally reachable addresses")
+				}
+			}
+		}
+	}()
 }
 
 // Close shuts the stack down in reverse start order, joining any errors.
