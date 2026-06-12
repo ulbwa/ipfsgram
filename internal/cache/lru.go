@@ -70,6 +70,11 @@ func (c *lruCache) Get(carID int64) (string, bool) {
 	return entryPath(c.dir, carID), true
 }
 
+// Put admits the file at src into the cache. Eviction happens before the
+// move: if moveFile then fails, the evicted entries are already gone and the
+// cache ends up emptier than strictly necessary. This is a documented
+// tradeoff — evicting first keeps the on-disk total within maxBytes at all
+// times, and a failed Put only costs re-downloadable cache entries.
 func (c *lruCache) Put(carID int64, src string, size int64) (string, error) {
 	dst := entryPath(c.dir, carID)
 

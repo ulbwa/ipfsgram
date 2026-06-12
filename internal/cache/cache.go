@@ -103,6 +103,13 @@ func moveFile(src, dst string) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("cache: copy: %w", err)
 	}
+	// Sync before close: the rename below makes the file visible under dst,
+	// so flush its contents to disk first for crash safety.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("cache: sync tmp: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("cache: close tmp: %w", err)

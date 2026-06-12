@@ -10,13 +10,15 @@ import (
 type FloodWaitError struct{ RetryAfter time.Duration }
 
 func (e *FloodWaitError) Error() string {
-	return fmt.Sprintf("tg: flood wait %s", e.RetryAfter)
+	return fmt.Sprintf("flood wait %s", e.RetryAfter)
 }
 
+// Сообщения sentinel-ошибок без префикса "tg: ": оборачивающий код пакета
+// (classifyBotAPIError и т.п.) добавляет его сам, иначе префикс дублируется.
 var (
-	ErrMessageDeleted = errors.New("tg: message deleted")
-	ErrNoAccess       = errors.New("tg: bot has no access")
-	ErrTooLarge       = errors.New("tg: file exceeds transport download limit")
+	ErrMessageDeleted = errors.New("message deleted")
+	ErrNoAccess       = errors.New("bot has no access")
+	ErrTooLarge       = errors.New("file exceeds transport download limit")
 	// ErrBadFileID — file_id протух или невалиден (Bot API: "wrong file_id").
-	ErrBadFileID = errors.New("tg: stale file_id")
+	ErrBadFileID = errors.New("stale file_id")
 )

@@ -12,6 +12,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// maxOpenConns caps the pool size so many daemons/CLIs sharing one PostgreSQL
+// instance do not exhaust its connection limit.
+const maxOpenConns = 10
+
 // Connect opens a PostgreSQL connection pool for the given DSN and verifies
 // it with a ping.
 func Connect(ctx context.Context, dsn string) (*sqlx.DB, error) {
@@ -19,6 +23,6 @@ func Connect(ctx context.Context, dsn string) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
-	conn.SetMaxOpenConns(10)
+	conn.SetMaxOpenConns(maxOpenConns)
 	return conn, nil
 }

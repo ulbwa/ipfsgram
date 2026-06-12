@@ -306,6 +306,95 @@ func TestDeleteMessage(t *testing.T) {
 	}
 }
 
+// Transport-level errors embed the request URL (which contains the bot
+// token); they must be sanitized before being returned to callers.
+func TestTransportErrorRedactsToken(t *testing.T) {
+	const secret = "12345:SECRET_TOKEN_VALUE"
+	// Port 0 is never connectable: dialing fails with *url.Error embedding
+	// the full request URL, including "/bot<token>/".
+	api := NewBotAPI("http://127.0.0.1:0")
+	_, _, err := api.ValidateToken(context.Background(), secret)
+	if err == nil {
+		t.Fatal("ValidateToken: expected error, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error leaks bot token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "<redacted>") {
+		t.Errorf("error does not contain redaction marker: %v", err)
+	}
+}
+
+func TestDownloadFileFetchErrorRedactsToken(t *testing.T) {
+	const secret = "12345:SECRET_TOKEN_VALUE"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/bot"+secret+"/getFile", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK,
+			`{"ok":true,"result":{"file_id":"F","file_path":"documents/f.car"}}`)
+	})
+	mux.HandleFunc("/file/bot"+secret+"/documents/f.car", func(w http.ResponseWriter, r *http.Request) {
+		// Drop the connection so the client sees a transport error whose
+		// *url.Error embeds the file URL with the token.
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		conn.Close()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	api := NewBotAPI(srv.URL)
+	rc, _, err := api.Download(context.Background(), secret, 1, 2, "F")
+	if err == nil {
+		rc.Close()
+		t.Fatal("Download: expected error, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error leaks bot token: %v", err)
+	}
+}
+
+// readRecorder records whether its Read was ever called.
+type readRecorder struct {
+	read bool
+}
+
+func (r *readRecorder) Read(p []byte) (int, error) {
+	r.read = true
+	return 0, io.EOF
+}
+
+// When request construction fails, Upload must return promptly without
+// starting the multipart writer goroutine (which would block forever on the
+// pipe with no reader).
+func TestUploadBadURLNoGoroutineLeak(t *testing.T) {
+	api := NewBotAPI("http://invalid host with spaces")
+	rr := &readRecorder{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := api.Upload(context.Background(), testToken, 1, "x.car", 1, rr)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Upload: expected error, got nil")
+		}
+		if strings.Contains(err.Error(), testToken) {
+			t.Errorf("error leaks bot token: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Upload did not return promptly on bad URL")
+	}
+	// The writer goroutine must not have been started: nothing should have
+	// touched the source reader.
+	time.Sleep(50 * time.Millisecond)
+	if rr.read {
+		t.Error("source reader was read despite request construction failure")
+	}
+}
+
 // Sanity check on raw JSON decoding of the Bot API envelope.
 func TestAPIResponseDecoding(t *testing.T) {
 	var resp apiResponse

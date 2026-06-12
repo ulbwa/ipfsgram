@@ -3,6 +3,7 @@ package tg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -106,12 +107,30 @@ func classifyBotAPIError(method string, resp *apiResponse) error {
 	return fmt.Errorf("tg: %s: bot api error %d: %s", method, resp.ErrorCode, desc)
 }
 
+// redactToken вычищает токен бота из текста ошибки: транспортные ошибки
+// (*url.Error и ошибки парсинга URL) содержат полный URL запроса с
+// "/bot<token>/". Если токен в тексте не встречается, ошибка возвращается
+// как есть (сохраняя обёртки для errors.Is/As); иначе возвращается плоская
+// ошибка с замаскированным токеном — для транспортных ошибок классификация
+// не нужна.
+func redactToken(token string, err error) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, token) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(msg, token, "<redacted>"))
+}
+
 // do выполняет POST-запрос и декодирует конверт ответа; при ok=false
-// возвращает классифицированную ошибку.
-func (b *BotAPI) do(req *http.Request, method string) (*apiResponse, error) {
+// возвращает классифицированную ошибку. Транспортные ошибки очищаются от
+// токена (URL запроса содержит "/bot<token>/").
+func (b *BotAPI) do(req *http.Request, token, method string) (*apiResponse, error) {
 	httpResp, err := b.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("tg: %s: %w", method, err)
+		return nil, fmt.Errorf("tg: %s: %w", method, redactToken(token, err))
 	}
 	defer httpResp.Body.Close()
 
@@ -137,11 +156,11 @@ func (b *BotAPI) call(ctx context.Context, token, method string, params url.Valu
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		b.BaseURL+"/bot"+token+"/"+method, strings.NewReader(params.Encode()))
 	if err != nil {
-		return fmt.Errorf("tg: %s: %w", method, err)
+		return fmt.Errorf("tg: %s: %w", method, redactToken(token, err))
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := b.do(req, method)
+	resp, err := b.do(req, token, method)
 	if err != nil {
 		return err
 	}
@@ -226,9 +245,19 @@ func (b *BotAPI) ProbeChannel(ctx context.Context, token string, channelTgID int
 
 // Upload публикует документ через sendDocument, стримя тело из r
 // (multipart через io.Pipe, без буферизации файла в памяти).
-func (b *BotAPI) Upload(ctx context.Context, token string, channelTgID int64, name string, size int64, r io.Reader) (UploadResult, error) {
+func (b *BotAPI) Upload(ctx context.Context, token string, channelTgID int64, name string, _ int64, r io.Reader) (UploadResult, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
+
+	// Запрос конструируется до старта пишущей горутины: если создание запроса
+	// не удалось, читатель pr никогда не появится и горутина навсегда зависла
+	// бы на pw.Write.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		b.BaseURL+"/bot"+token+"/sendDocument", pr)
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("tg: sendDocument: %w", redactToken(token, err))
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 
 	go func() {
 		err := func() error {
@@ -250,14 +279,7 @@ func (b *BotAPI) Upload(ctx context.Context, token string, channelTgID int64, na
 		pw.CloseWithError(err)
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		b.BaseURL+"/bot"+token+"/sendDocument", pr)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("tg: sendDocument: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-
-	resp, err := b.do(req, "sendDocument")
+	resp, err := b.do(req, token, "sendDocument")
 	if err != nil {
 		return UploadResult{}, err
 	}
@@ -306,11 +328,11 @@ func (b *BotAPI) Download(ctx context.Context, token string, channelTgID, messag
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		b.BaseURL+"/file/bot"+token+"/"+file.FilePath, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("tg: download file: %w", err)
+		return nil, "", fmt.Errorf("tg: download file: %w", redactToken(token, err))
 	}
 	httpResp, err := b.HTTP.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("tg: download file: %w", err)
+		return nil, "", fmt.Errorf("tg: download file: %w", redactToken(token, err))
 	}
 	if httpResp.StatusCode != http.StatusOK {
 		httpResp.Body.Close()
