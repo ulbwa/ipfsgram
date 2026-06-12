@@ -91,17 +91,26 @@ ipfsgram mtproto status
 
 ## Architecture
 
-ipfsgram follows a hexagonal (ports-and-adapters) layout:
+ipfsgram is organized as a small set of focused packages under `internal/`:
 
-- **domain** — plain models and errors, no I/O.
-- **port** — the interfaces the rest of the code depends on.
-- **adapter** — concrete implementations of those ports: `gormrepo`
-  (PostgreSQL), `telegram` (Bot API + MTProto transport), `diskcache` (CAR
-  cache), `carpack` (CARv1 packing/reading), `selector` (bot/channel routing),
-  `libp2pnode` (the IPFS node), `blocksource` (file and network DAG sources).
-- **service** — use cases: `blockstore` (serve blocks to libp2p), `publish`
-  (import and upload), `maintenance` (gc, doctor, unpin).
-- **cmd** — the cobra wiring; commands talk to ports only.
+- **store** — the data-access layer: GORM models for the PostgreSQL schema and
+  a single `Store` type carrying every query. All database access goes through
+  it.
+- **telegram** — the Telegram clients: Bot API (official or self-hosted),
+  MTProto (no 20 MB download cap), and a hybrid that routes downloads through
+  MTProto when enabled.
+- **car** — CARv1 packing (size-capped, rotating) and reading.
+- **cache** — the daemon's disk cache for downloaded CARs (`lru` and `ttl`
+  strategies).
+- **selector** — the bot/channel selection strategies (least-loaded healthy
+  bot, fill-first channel) and the in-memory load counter.
+- **publish** — the `add` workflow: load a DAG from a file or the IPFS
+  network, dedup against stored blocks, pack into CARs, upload, record the pin.
+- **maintain** — housekeeping: unpin, gc, the doctor's diagnostics, and the
+  impact plans behind `bot remove` / `channel remove`.
+- **daemon** — the IPFS node: libp2p + Bitswap + DHT serving blocks out of
+  Telegram through the disk cache.
+- **cmd/ipfsgram** — the cobra commands; thin wiring over the packages above.
 
 Persistence is GORM on top of a schema managed by
 [dbmate](https://github.com/amacneil/dbmate). The migrations are embedded in the
