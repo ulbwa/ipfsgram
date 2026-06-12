@@ -139,8 +139,10 @@ func newStatusCmd() *cobra.Command {
 			defer a.Close()
 
 			warnThreshold, err := a.Config.GetFloat64(ctx, "channel_warn_threshold")
-			if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
 				warnThreshold = 0.9
+			} else if err != nil {
+				return err
 			}
 
 			channels, err := a.Channels.List(ctx)
