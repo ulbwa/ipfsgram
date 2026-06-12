@@ -89,6 +89,27 @@ ipfsgram mtproto enable
 ipfsgram mtproto status
 ```
 
+## Architecture
+
+ipfsgram follows a hexagonal (ports-and-adapters) layout:
+
+- **domain** — plain models and errors, no I/O.
+- **port** — the interfaces the rest of the code depends on.
+- **adapter** — concrete implementations of those ports: `gormrepo`
+  (PostgreSQL), `telegram` (Bot API + MTProto transport), `diskcache` (CAR
+  cache), `carpack` (CARv1 packing/reading), `selector` (bot/channel routing),
+  `libp2pnode` (the IPFS node), `blocksource` (file and network DAG sources).
+- **service** — use cases: `blockstore` (serve blocks to libp2p), `publish`
+  (import and upload), `maintenance` (gc, doctor, unpin).
+- **cmd** — the cobra wiring; commands talk to ports only.
+
+Persistence is GORM on top of a schema managed by
+[dbmate](https://github.com/amacneil/dbmate). The migrations are embedded in the
+binary (`db/migrations`) and applied by `ipfsgram db migrate`. The binary pins
+the schema version it was built against and refuses to run against a database at
+a different version, so an out-of-date deployment fails fast instead of
+corrupting data.
+
 ## Data safety
 
 Nothing is deleted automatically. The only data that disappears on its own is
