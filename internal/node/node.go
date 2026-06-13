@@ -36,6 +36,7 @@ import (
 	routingdisc "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	discutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
+	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/rs/zerolog/log"
 )
@@ -65,6 +66,18 @@ type Config struct {
 	// https://delegated-ipfs.dev) combined with the DHT for providing and
 	// lookups, mirroring Kubo's Routing.DelegatedRouters: ["auto"]. Default true.
 	DelegatedRouting bool
+	// BootstrapPeers are extra peer multiaddrs (each ending in /p2p/<id>) added
+	// to the DHT's default bootstrap set, mirroring Kubo's
+	// Bootstrap: ["auto", <peer>]. The node dials them on startup to join the
+	// DHT. May be empty.
+	BootstrapPeers []string
+	// StaticRelays are circuit-relay-v2 server multiaddrs (each ending in
+	// /p2p/<id>) the node always tries to reserve a relay slot on, mirroring
+	// Kubo's Swarm.RelayClient.StaticRelays. They are offered to AutoRelay ahead
+	// of relays discovered through the DHT, so a node behind NAT obtains a
+	// /p2p-circuit address without depending solely on DHT relay discovery. May
+	// be empty.
+	StaticRelays []string
 }
 
 // Node bundles the libp2p stack: host, Kademlia DHT (server mode), Bitswap and
@@ -106,23 +119,50 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		return nil, err
 	}
 
+	// Extra DHT bootstrap peers (Kubo's Bootstrap: ["auto", ...]) and the static
+	// circuit relays (Kubo's Swarm.RelayClient.StaticRelays). Parsing failures are
+	// fatal: a misconfigured relay/bootstrap multiaddr should surface at startup,
+	// not silently drop the operator's relay.
+	extraBootstrap, err := parseAddrInfos(cfg.BootstrapPeers)
+	if err != nil {
+		return nil, fmt.Errorf("node: bootstrap peers: %w", err)
+	}
+	staticRelays, err := parseAddrInfos(cfg.StaticRelays)
+	if err != nil {
+		return nil, fmt.Errorf("node: static relays: %w", err)
+	}
+
 	// kadDHT is constructed inside the libp2p.Routing hook (so AutoRelay can use
 	// it as a peer source) and captured here for Bitswap and the reprovider.
 	var kadDHT *dht.IpfsDHT
 
-	// relayPeerSource feeds AutoRelay with real circuit-relay v2 servers found
-	// through DHT routing discovery (peers advertising the "/libp2p/relay"
-	// rendezvous), the same way Kubo discovers relays. Feeding arbitrary routing
-	// table peers instead would mostly yield non-relays and fail to reserve.
+	// relayPeerSource feeds AutoRelay with circuit-relay v2 servers: the
+	// configured static relays first (so they are always tried, even before the
+	// DHT routing table fills), then relays found through DHT routing discovery
+	// (peers advertising the "/libp2p/relay" rendezvous), the same way Kubo
+	// discovers relays. Feeding arbitrary routing table peers instead would mostly
+	// yield non-relays and fail to reserve.
 	relayPeerSource := func(ctx context.Context, num int) <-chan peer.AddrInfo {
 		out := make(chan peer.AddrInfo)
 		go func() {
 			defer close(out)
-			if kadDHT == nil {
+			sent := 0
+			for _, p := range staticRelays {
+				if sent >= num {
+					return
+				}
+				select {
+				case out <- p:
+					sent++
+				case <-ctx.Done():
+					return
+				}
+			}
+			if sent >= num || kadDHT == nil {
 				return
 			}
 			rd := routingdisc.NewRoutingDiscovery(kadDHT)
-			peers, err := discutil.FindPeers(ctx, rd, "/libp2p/relay", discovery.Limit(num))
+			peers, err := discutil.FindPeers(ctx, rd, "/libp2p/relay", discovery.Limit(num-sent))
 			if err != nil {
 				return
 			}
@@ -154,9 +194,11 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		libp2p.EnableHolePunching(),
 		libp2p.EnableAutoRelayWithPeerSource(relayPeerSource, autorelay.WithMinInterval(0)),
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+			// Default ("auto") bootstrap peers plus any operator-supplied ones.
+			bootstrap := append(dht.GetDefaultBootstrapPeerAddrInfos(), extraBootstrap...)
 			d, derr := dht.New(ctx, h,
 				dht.Mode(dht.ModeServer),
-				dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...),
+				dht.BootstrapPeers(bootstrap...),
 			)
 			kadDHT = d
 			return d, derr
@@ -266,6 +308,24 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		n.certMgr = certMgr
 	}
 	return n, nil
+}
+
+// parseAddrInfos parses p2p multiaddr strings (each ending in /p2p/<id>) into
+// peer.AddrInfos, merging the addresses of entries that share a peer ID. A nil
+// or empty input yields a nil slice and no error.
+func parseAddrInfos(addrs []string) ([]peer.AddrInfo, error) {
+	if len(addrs) == 0 {
+		return nil, nil
+	}
+	mas := make([]ma.Multiaddr, 0, len(addrs))
+	for _, s := range addrs {
+		a, err := ma.NewMultiaddr(s)
+		if err != nil {
+			return nil, fmt.Errorf("parse multiaddr %q: %w", s, err)
+		}
+		mas = append(mas, a)
+	}
+	return peer.AddrInfosFromP2pAddrs(mas...)
 }
 
 // announceWhenReady waits for the DHT routing table to populate, then triggers

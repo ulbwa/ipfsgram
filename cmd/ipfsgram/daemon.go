@@ -35,6 +35,15 @@ var defaultListen = []string{
 	"/ip6/::/udp/4001/webrtc-direct",
 }
 
+// defaultRelays are the circuit-relay-v2 servers operated for ipfsgram. The
+// daemon adds them to its DHT bootstrap set and offers them to AutoRelay as
+// static relays (Kubo's Bootstrap: ["auto", ...] + Swarm.RelayClient.StaticRelays),
+// so a node behind NAT obtains a public /p2p-circuit address through them
+// instead of relying solely on relays discovered through the DHT.
+var defaultRelays = []string{
+	"/ip4/31.77.129.159/tcp/4001/p2p/12D3KooWE9w9rJNac1yZPxWtP4etuDqVjjnEXcnmr9Xt2dZNijZw",
+}
+
 // newDaemonCmd returns the `ipfsgram daemon` command.
 func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -64,6 +73,7 @@ func newDaemonCmd() *cobra.Command {
 	flags.String("cache-strategy", "", "cache eviction strategy: lru or ttl [$"+envPrefix+"CACHE_STRATEGY, default lru]")
 	flags.Duration("cache-ttl", 0, "entry lifetime for the ttl strategy [$"+envPrefix+"CACHE_TTL, default 1h]")
 	flags.StringArray("listen", nil, "libp2p listen multiaddr, repeatable [$"+envPrefix+"LISTEN comma-separated, default "+strings.Join(defaultListen, ",")+"]")
+	flags.StringArray("relay", nil, "circuit-relay-v2 server multiaddr (bootstrap + AutoRelay static relay), repeatable [$"+envPrefix+"RELAY comma-separated, default "+strings.Join(defaultRelays, ",")+"]")
 	flags.Bool("autotls", true, "AutoTLS via libp2p.direct (secure WebSocket), like Kubo [$"+envPrefix+"AUTOTLS, default true]")
 	flags.Bool("delegated-routing", true, "announce/lookup via the HTTP delegated router (IPNI) in addition to the DHT [$"+envPrefix+"DELEGATED_ROUTING, default true]")
 	return cmd
@@ -143,6 +153,7 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	}
 
 	cfg.Listen = resolveListen(cmd)
+	cfg.Relays = resolveRelays(cmd)
 	cfg.AutoTLS = boolFlagOrEnv(cmd, "autotls", "AUTOTLS", true)
 	cfg.DelegatedRouting = boolFlagOrEnv(cmd, "delegated-routing", "DELEGATED_ROUTING", true)
 	return cfg, nil
@@ -165,4 +176,30 @@ func resolveListen(cmd *cobra.Command) []string {
 		listen = defaultListen
 	}
 	return listen
+}
+
+// resolveRelays resolves the circuit-relay-v2 servers as flag → comma-separated
+// environment → default. An explicit single empty value (--relay= or
+// IPFSGRAM_RELAY=) yields no relays, allowing the built-in default to be
+// disabled.
+func resolveRelays(cmd *cobra.Command) []string {
+	if cmd.Flags().Changed("relay") {
+		relays, _ := cmd.Flags().GetStringArray("relay")
+		return cleanAddrs(relays)
+	}
+	if env, ok := os.LookupEnv(envPrefix + "RELAY"); ok {
+		return cleanAddrs(strings.Split(env, ","))
+	}
+	return defaultRelays
+}
+
+// cleanAddrs trims whitespace and drops empty entries.
+func cleanAddrs(in []string) []string {
+	var out []string
+	for _, a := range in {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }

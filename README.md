@@ -54,6 +54,7 @@ flag → environment variable → default:
 | `--cache-strategy` | `IPFSGRAM_CACHE_STRATEGY` | `lru` | Cache eviction strategy: `lru` or `ttl` |
 | `--cache-ttl` | `IPFSGRAM_CACHE_TTL` | `1h` | Entry lifetime for the `ttl` strategy |
 | `--listen` | `IPFSGRAM_LISTEN` (comma-separated) | `/ip4/0.0.0.0/tcp/4001`, `/ip4/0.0.0.0/udp/4001/quic-v1` | libp2p listen multiaddr (repeatable) |
+| `--relay` | `IPFSGRAM_RELAY` (comma-separated) | built-in ipfsgram relay | circuit-relay-v2 server multiaddr, added to DHT bootstrap and used as an AutoRelay static relay (repeatable; set empty to disable) |
 | `--dsn` | `IPFSGRAM_DSN` | — | PostgreSQL DSN (shared by all commands) |
 
 ## Other commands

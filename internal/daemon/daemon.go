@@ -46,6 +46,11 @@ type Config struct {
 	// DelegatedRouting enables the HTTP delegated router (IPNI) alongside the
 	// DHT, mirroring Kubo's Routing.DelegatedRouters. Default true.
 	DelegatedRouting bool
+	// Relays are circuit-relay-v2 server multiaddrs (each ending in /p2p/<id>).
+	// They are added to the DHT bootstrap set and offered to AutoRelay as static
+	// relays, mirroring Kubo's Bootstrap + Swarm.RelayClient.StaticRelays, so a
+	// node behind NAT gets a public /p2p-circuit address through them.
+	Relays []string
 }
 
 // Run wires the disk cache, blockstore and libp2p node on top of the supplied
@@ -86,6 +91,8 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 		DataDir:          cfg.DataDir,
 		AutoTLS:          cfg.AutoTLS,
 		DelegatedRouting: cfg.DelegatedRouting,
+		BootstrapPeers:   cfg.Relays,
+		StaticRelays:     cfg.Relays,
 	})
 	if err != nil {
 		return err
