@@ -24,11 +24,14 @@ import (
 	dssync "github.com/ipfs/go-datastore/sync"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/discovery"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	routingdisc "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	discutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/rs/zerolog/log"
@@ -92,9 +95,10 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	// it as a peer source) and captured here for Bitswap and the reprovider.
 	var kadDHT *dht.IpfsDHT
 
-	// relayPeerSource feeds AutoRelay candidate relays discovered through the
-	// DHT routing table, so a NAT'd node can obtain a public relay address when
-	// neither UPnP nor hole punching yields a directly dialable address.
+	// relayPeerSource feeds AutoRelay with real circuit-relay v2 servers found
+	// through DHT routing discovery (peers advertising the "/libp2p/relay"
+	// rendezvous), the same way Kubo discovers relays. Feeding arbitrary routing
+	// table peers instead would mostly yield non-relays and fail to reserve.
 	relayPeerSource := func(ctx context.Context, num int) <-chan peer.AddrInfo {
 		out := make(chan peer.AddrInfo)
 		go func() {
@@ -102,19 +106,14 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 			if kadDHT == nil {
 				return
 			}
-			peers := kadDHT.RoutingTable().ListPeers()
-			sent := 0
+			rd := routingdisc.NewRoutingDiscovery(kadDHT)
+			peers, err := discutil.FindPeers(ctx, rd, "/libp2p/relay", discovery.Limit(num))
+			if err != nil {
+				return
+			}
 			for _, p := range peers {
-				if sent >= num {
-					return
-				}
-				addrs := kadDHT.Host().Peerstore().Addrs(p)
-				if len(addrs) == 0 {
-					continue
-				}
 				select {
-				case out <- peer.AddrInfo{ID: p, Addrs: addrs}:
-					sent++
+				case out <- p:
 				case <-ctx.Done():
 					return
 				}
@@ -126,9 +125,15 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrStrings(cfg.ListenAddrs...),
-		// NAT traversal so a node behind a home router is reachable from other
-		// networks and public gateways: map the port via UPnP/NAT-PMP, run the
-		// AutoNAT service, hole-punch (DCUtR), and fall back to circuit relays.
+		// The default transports already include WebRTC-direct (browser-grade
+		// ICE/STUN NAT traversal); we enable it by listening on a webrtc-direct
+		// multiaddr (see cmd defaultListen). It makes a node behind a home/CGNAT
+		// router directly dialable over UDP where QUIC alone is not — the same
+		// mechanism that lets Kubo serve from behind the NAT.
+		//
+		// NAT traversal: map the port via UPnP/NAT-PMP, run the AutoNAT service,
+		// hole-punch (DCUtR), and fall back to circuit relays discovered on the
+		// DHT.
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
