@@ -200,6 +200,13 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 			d, derr := dht.New(ctx, h,
 				dht.Mode(dht.ModeServer),
 				dht.BootstrapPeers(bootstrap...),
+				// Advertise only WAN-dialable addresses (public + relay
+				// /p2p-circuit) to the global DHT, never this host's private LAN
+				// addresses. This host has several interfaces; without the filter
+				// a remote dialer can receive a record full of 192.168.* addresses
+				// and give up with "no good addresses" even though a dialable relay
+				// address exists. LAN discovery is unaffected (it uses mDNS).
+				dht.AddressFilter(wanAddrs),
 			)
 			kadDHT = d
 			return d, derr
@@ -309,6 +316,28 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		n.certMgr = certMgr
 	}
 	return n, nil
+}
+
+// wanAddrs keeps only WAN-reachable multiaddrs — public IPs and relay
+// /p2p-circuit addresses — dropping private, loopback and link-local ones. It is
+// the DHT's address filter, so the node never advertises its LAN addresses to
+// the global DHT. A relay address (whose IP is the relay's public IP) is kept
+// even when expressed as a /dns4 libp2p.direct name, which IsPublicAddr cannot
+// classify on its own.
+func wanAddrs(addrs []ma.Multiaddr) []ma.Multiaddr {
+	out := make([]ma.Multiaddr, 0, len(addrs))
+	for _, a := range addrs {
+		if isCircuitAddr(a) || manet.IsPublicAddr(a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// isCircuitAddr reports whether a is a circuit-relay (/p2p-circuit) address.
+func isCircuitAddr(a ma.Multiaddr) bool {
+	_, err := a.ValueForProtocol(ma.P_CIRCUIT)
+	return err == nil
 }
 
 // parseAddrInfos parses p2p multiaddr strings (each ending in /p2p/<id>) into
