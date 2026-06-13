@@ -250,12 +250,18 @@ func announceWhenReady(ctx context.Context, kadDHT *dht.IpfsDHT, prov provider.S
 	}
 }
 
-// reannounceOnAddrChange re-provides all stored CIDs whenever the set of public
-// (non-private) addresses changes, so DHT provider records always carry the
-// node's current directly-dialable addresses. Re-announces are debounced to
-// coalesce bursts of address updates during startup.
+// reannounceOnAddrChange re-provides all stored CIDs whenever the node's public
+// addresses or NAT reachability change, so DHT provider records always carry the
+// node's current directly-dialable addresses. This matters because public
+// addresses (UPnP/AutoNAT/WebRTC) and a Public reachability verdict appear
+// asynchronously, usually AFTER the first announce — without a re-announce the
+// DHT keeps relay-only records that browser/proxy gateways cannot dial.
+// Re-announces are debounced to coalesce startup bursts.
 func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.System) {
-	sub, err := h.EventBus().Subscribe(new(event.EvtLocalAddressesUpdated))
+	sub, err := h.EventBus().Subscribe([]any{
+		new(event.EvtLocalAddressesUpdated),
+		new(event.EvtLocalReachabilityChanged),
+	})
 	if err != nil {
 		log.Warn().Err(err).Msg("subscribe to address-change events")
 		return
@@ -273,7 +279,10 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 		return strings.Join(s, ",")
 	}
 
-	last := publicSet()
+	// Start from empty so the first observed set of public addresses always
+	// triggers a re-announce, even if those addresses were already present by
+	// the time this subscription was established (a common startup race).
+	last := ""
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
 	for {
@@ -292,7 +301,7 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 			if err := prov.Reprovide(ctx); err != nil && ctx.Err() == nil {
 				log.Warn().Err(err).Msg("re-announce after address change")
 			} else if ctx.Err() == nil {
-				log.Info().Msg("re-announced CIDs after address change")
+				log.Info().Msg("re-announced CIDs after address/reachability change")
 			}
 		}
 	}
