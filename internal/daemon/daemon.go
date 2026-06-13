@@ -24,6 +24,9 @@ import (
 // flags and environment fallbacks; Run applies the remaining defaults
 // (CacheDir defaults to <DataDir>/cache).
 type Config struct {
+	// DSN is the PostgreSQL connection string, used for a dedicated
+	// LISTEN/NOTIFY connection that announces newly published content instantly.
+	DSN string
 	// DataDir is the daemon state directory (identity key, MTProto sessions).
 	DataDir string
 	// CacheDir is the CAR disk cache directory; empty means <DataDir>/cache.
@@ -95,6 +98,12 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 	// seconds, without waiting for the full per-block reprovide to finish.
 	go provideRoots(ctx, n, st)
 
+	// Announce newly published content the instant the CLI commits it, via
+	// PostgreSQL LISTEN/NOTIFY, rather than waiting for the next reprovide.
+	if cfg.DSN != "" {
+		go listenAndProvide(ctx, cfg.DSN, n)
+	}
+
 	<-ctx.Done()
 	log.Info().Msg("shutting down")
 	return nil
@@ -133,6 +142,43 @@ func provideRoots(ctx context.Context, n *node.Node, st *store.Store) {
 		done++
 	}
 	log.Info().Int("roots", done).Msg("announced pin roots to the DHT")
+}
+
+// listenAndProvide subscribes to the store's new-content notifications and
+// announces each freshly published root CID to the DHT immediately. It
+// reconnects if the LISTEN connection drops, until ctx is cancelled.
+func listenAndProvide(ctx context.Context, dsn string, n *node.Node) {
+	for ctx.Err() == nil {
+		ch, err := store.ListenContent(ctx, dsn)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn().Err(err).Msg("listen for new content failed, retrying in 5s")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+		log.Info().Msg("listening for new-content notifications")
+		for root := range ch {
+			c, err := cid.Cast(root)
+			if err != nil {
+				continue
+			}
+			if err := n.Provider.Provide(ctx, c, true); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Warn().Err(err).Stringer("cid", c).Msg("announce new content")
+				continue
+			}
+			log.Info().Stringer("cid", c).Msg("announced new content to the DHT")
+		}
+		// Channel closed: connection lost or ctx done. Loop to reconnect.
+	}
 }
 
 // buildCache constructs the disk cache per the configured strategy.

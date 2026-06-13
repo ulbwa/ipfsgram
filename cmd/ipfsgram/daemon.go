@@ -45,6 +45,7 @@ func newDaemonCmd() *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
+			cfg.DSN = resolveDSN(cmd)
 			a, err := openApp(ctx, cmd, filepath.Join(cfg.DataDir, "mtproto-sessions"))
 			if err != nil {
 				return err

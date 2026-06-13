@@ -92,6 +92,7 @@ func (d *fakeDB) CreatePin(_ context.Context, _ []byte, name string, _ int64, _ 
 	d.pinName = name
 	return nil
 }
+func (d *fakeDB) NotifyNewContent(context.Context, []byte) error { return nil }
 func (d *fakeDB) WithSharedPublishLock(ctx context.Context, fn func(ctx context.Context) error) error {
 	d.lockCalls++
 	return fn(ctx)

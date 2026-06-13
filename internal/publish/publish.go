@@ -66,6 +66,7 @@ type database interface {
 	SetBotUnavailable(ctx context.Context, id int64, until time.Time) error
 
 	CreatePin(ctx context.Context, root []byte, name string, size int64, blockCIDs [][]byte) error
+	NotifyNewContent(ctx context.Context, rootCID []byte) error
 
 	WithSharedPublishLock(ctx context.Context, fn func(ctx context.Context) error) error
 }
@@ -170,6 +171,13 @@ func (p *Publisher) Publish(ctx context.Context, root cid.Cid, name string, bloc
 	})
 	if err != nil {
 		return cid.Undef, err
+	}
+
+	// Tell running daemons to announce this root to the DHT now, rather than
+	// waiting for their next reprovide. Best-effort: the content is already
+	// committed, and the periodic reprovide is the backstop.
+	if err := p.db.NotifyNewContent(ctx, root.Bytes()); err != nil {
+		p.log.Warn().Err(err).Stringer("cid", root).Msg("notify daemons of new content")
 	}
 	return root, nil
 }
