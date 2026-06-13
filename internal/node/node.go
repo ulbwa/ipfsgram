@@ -192,6 +192,15 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		// DHT.
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
+		// AutoNAT v2 verifies reachability per address, so a node behind NAT can
+		// confirm that its UDP transports (QUIC, WebTransport, WebRTC-direct) are
+		// publicly dialable even when inbound TCP is not, and then advertise those
+		// addresses to the DHT. Without it the node only runs AutoNAT v1 (TCP
+		// dial-back); behind a NAT that blocks inbound TCP it stays stuck on
+		// "Private" and never publishes its working WebRTC-direct address — exactly
+		// what lets Kubo serve from behind the same NAT. Required for the node to
+		// be reachable without relying on a relay.
+		libp2p.EnableAutoNATv2(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableAutoRelayWithPeerSource(relayPeerSource, autorelay.WithMinInterval(0)),
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
