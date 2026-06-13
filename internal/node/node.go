@@ -63,8 +63,9 @@ type Config struct {
 	// Kubo's AutoTLS. Best-effort; never blocks or fails startup. Default true.
 	AutoTLS bool
 	// DelegatedRouting enables the HTTP delegated content router (IPNI via
-	// https://delegated-ipfs.dev) combined with the DHT for providing and
-	// lookups, mirroring Kubo's Routing.DelegatedRouters: ["auto"]. Default true.
+	// https://delegated-ipfs.dev) combined with the DHT for provider lookups,
+	// mirroring Kubo's Routing.DelegatedRouters: ["auto"]. Announcing still goes
+	// to the DHT only (the delegated endpoint is read-only). Default true.
 	DelegatedRouting bool
 	// BootstrapPeers are extra peer multiaddrs (each ending in /p2p/<id>) added
 	// to the DHT's default bootstrap set, mirroring Kubo's
@@ -416,9 +417,18 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 				debounce.Reset(10 * time.Second)
 			}
 		case <-debounce.C:
-			if err := prov.Reprovide(ctx); err != nil && ctx.Err() == nil {
-				log.Warn().Err(err).Msg("re-announce after address change")
-			} else if ctx.Err() == nil {
+			if err := prov.Reprovide(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				// A reprovide may already be in flight (the startup announce or
+				// the periodic cycle holds an exclusive lock). Retry shortly so
+				// the changed addresses — most importantly a freshly reserved
+				// relay /p2p-circuit — actually get republished to the DHT,
+				// instead of being dropped until the next address change.
+				log.Debug().Err(err).Msg("re-announce after address change busy, retrying")
+				debounce.Reset(15 * time.Second)
+			} else {
 				log.Info().Msg("re-announced CIDs after address/reachability change")
 			}
 		}

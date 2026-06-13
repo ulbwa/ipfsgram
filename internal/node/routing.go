@@ -8,11 +8,13 @@
 package node
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	httprouting "github.com/ipfs/boxo/routing/http/client"
 	"github.com/ipfs/boxo/routing/http/contentrouter"
+	"github.com/ipfs/go-cid"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	record "github.com/libp2p/go-libp2p-record"
 	routinghelpers "github.com/libp2p/go-libp2p-routing-helpers"
@@ -36,19 +38,41 @@ func newDelegatedRouter() (routing.Routing, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Lookup-only. The HTTP delegated-routing write path (IPIP-526
+	// ProvideBitswap) is deprecated and the public delegated-ipfs.dev endpoint is
+	// read-only, so this router can only answer FindProviders, not announce. We
+	// wrap it so Provide reports routing.ErrNotSupported: routinghelpers.Parallel
+	// ignores ErrNotSupported (unlike a real error), so the combined router's
+	// Provide/Reprovide succeeds via the DHT alone. Without this, every reprovide
+	// fails on "cannot provide Bitswap records without an identity", which stops
+	// provider records from ever being refreshed — so a node behind NAT never
+	// republishes its freshly reserved relay /p2p-circuit address and stays
+	// unreachable.
+	//
 	// The HTTP client provides only ContentRouting; wrap it in a Compose so it
 	// satisfies the full routing.Routing interface (nil PeerRouting/ValueStore
 	// behave as the Null router).
 	return &routinghelpers.Compose{
-		ContentRouting: contentrouter.NewContentRoutingClient(c),
+		ContentRouting: lookupContentRouting{contentrouter.NewContentRoutingClient(c)},
 	}, nil
 }
 
+// lookupContentRouting answers provider lookups via the embedded delegated
+// content router but reports providing as unsupported, so the delegated router
+// is never used to announce (see newDelegatedRouter).
+type lookupContentRouting struct{ routing.ContentRouting }
+
+func (lookupContentRouting) Provide(context.Context, cid.Cid, bool) error {
+	return routing.ErrNotSupported
+}
+
 // combineRouters returns a routing.Routing that fans out to both the Amino DHT
-// and the delegated HTTP router in parallel: Provide announces to both, and
-// FindProviders queries both. The provider system uses this combined router so
-// reprovides reach IPNI as well as the DHT. The DHT alone remains wired into
-// libp2p's internal PeerRouting via the libp2p.Routing hook in node.New.
+// and the delegated HTTP router in parallel: FindProviders queries both, while
+// Provide reaches only the DHT (the delegated router reports providing as
+// unsupported — see newDelegatedRouter). The provider system uses this combined
+// router so lookups can hit IPNI while announces go to the DHT. The DHT alone
+// remains wired into libp2p's internal PeerRouting via the libp2p.Routing hook
+// in node.New.
 func combineRouters(kadDHT *dht.IpfsDHT, delegated routing.Routing) routing.Routing {
 	return routinghelpers.Parallel{
 		Routers:   []routing.Routing{kadDHT, delegated},

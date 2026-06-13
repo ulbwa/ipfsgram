@@ -10,9 +10,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p/core/event"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/rs/zerolog/log"
 
 	"github.com/ulbwa/ipfsgram/internal/cache"
@@ -125,10 +129,18 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 	return nil
 }
 
-// provideRoots waits for the DHT routing table to populate, then announces each
-// pin's root CID to the DHT. Roots are the entry points gateways look up, so
-// announcing the few of them first makes content discoverable quickly while the
-// node's full per-block reprovide proceeds in the background.
+// provideRoots waits for the DHT routing table to populate, announces each pin's
+// root CID to the DHT, and re-announces the roots whenever the node's public
+// addresses change. Roots are the entry points gateways look up, so announcing
+// the few of them is fast (a handful of CIDs) and makes content discoverable
+// quickly while the node's full per-block reprovide proceeds in the background.
+//
+// Re-announcing on address change is what makes a node behind NAT actually
+// reachable: a relay /p2p-circuit address is reserved a few minutes after
+// startup, and without re-announcing the root records keep only the node's
+// stale, undialable direct addresses. This goes through the provider queue, so
+// unlike a full Reprovide it is not blocked by the slow startup reprovide and
+// publishes the new addresses within seconds.
 func provideRoots(ctx context.Context, n *node.Node, st *store.Store) {
 	for n.DHT.RoutingTable().Size() < 1 {
 		select {
@@ -137,27 +149,75 @@ func provideRoots(ctx context.Context, n *node.Node, st *store.Store) {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	pins, err := st.Pins(ctx)
+
+	announce := func() {
+		pins, err := st.Pins(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("load pins for root announce")
+			return
+		}
+		var done int
+		for _, p := range pins {
+			c, err := cid.Cast(p.RootCID)
+			if err != nil {
+				continue
+			}
+			if err := n.Provider.Provide(ctx, c, true); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Warn().Err(err).Stringer("cid", c).Msg("announce pin root")
+				continue
+			}
+			done++
+		}
+		log.Info().Int("roots", done).Msg("announced pin roots to the DHT")
+	}
+	announce()
+
+	sub, err := n.Host.EventBus().Subscribe([]any{
+		new(event.EvtLocalAddressesUpdated),
+		new(event.EvtLocalReachabilityChanged),
+	})
 	if err != nil {
-		log.Warn().Err(err).Msg("load pins for root announce")
+		log.Warn().Err(err).Msg("subscribe to address changes for root re-announce")
 		return
 	}
-	var done int
-	for _, p := range pins {
-		c, err := cid.Cast(p.RootCID)
-		if err != nil {
-			continue
+	defer sub.Close()
+
+	publicSet := func() string {
+		var s []string
+		for _, a := range n.Host.Addrs() {
+			if !manet.IsPrivateAddr(a) {
+				s = append(s, a.String())
+			}
 		}
-		if err := n.Provider.Provide(ctx, c, true); err != nil {
-			if ctx.Err() != nil {
+		sort.Strings(s)
+		return strings.Join(s, ",")
+	}
+
+	// Start from empty so the first observed public-address set (which may
+	// already be present by the time the subscription is established) triggers a
+	// re-announce.
+	last := ""
+	debounce := time.NewTimer(time.Hour)
+	debounce.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-sub.Out():
+			if !ok {
 				return
 			}
-			log.Warn().Err(err).Str("cid", c.String()).Msg("announce pin root")
-			continue
+			if cur := publicSet(); cur != last && cur != "" {
+				last = cur
+				debounce.Reset(5 * time.Second)
+			}
+		case <-debounce.C:
+			announce()
 		}
-		done++
 	}
-	log.Info().Int("roots", done).Msg("announced pin roots to the DHT")
 }
 
 // listenAndProvide subscribes to the store's new-content notifications and

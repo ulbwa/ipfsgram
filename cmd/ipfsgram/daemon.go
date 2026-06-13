@@ -75,7 +75,7 @@ func newDaemonCmd() *cobra.Command {
 	flags.StringArray("listen", nil, "libp2p listen multiaddr, repeatable [$"+envPrefix+"LISTEN comma-separated, default "+strings.Join(defaultListen, ",")+"]")
 	flags.StringArray("relay", nil, "circuit-relay-v2 server multiaddr (bootstrap + AutoRelay static relay), repeatable [$"+envPrefix+"RELAY comma-separated, default "+strings.Join(defaultRelays, ",")+"]")
 	flags.Bool("autotls", true, "AutoTLS via libp2p.direct (secure WebSocket), like Kubo [$"+envPrefix+"AUTOTLS, default true]")
-	flags.Bool("delegated-routing", true, "announce/lookup via the HTTP delegated router (IPNI) in addition to the DHT [$"+envPrefix+"DELEGATED_ROUTING, default true]")
+	flags.Bool("delegated-routing", true, "look up providers via the HTTP delegated router (IPNI) in addition to the DHT [$"+envPrefix+"DELEGATED_ROUTING, default true]")
 	return cmd
 }
 
