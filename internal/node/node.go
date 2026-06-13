@@ -181,20 +181,59 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		mdnsSvc = nil
 	}
 
-	// Announce every stored CID to the DHT right away, instead of waiting for
-	// the first scheduled reprovide. Without provider records a remote peer
-	// cannot discover that this node holds the content from the CID alone.
-	go func() {
-		if err := prov.Reprovide(ctx); err != nil && ctx.Err() == nil {
-			log.Warn().Err(err).Msg("initial reprovide")
-		}
-	}()
+	// Announce every stored CID to the DHT soon after startup, instead of
+	// waiting for the first scheduled reprovide (~hours away). Without provider
+	// records a remote peer cannot discover that this node holds the content
+	// from the CID alone. The announce must wait until the DHT routing table has
+	// peers — providing with an empty table fails with "failed to find any peer
+	// in table" — and is retried until it succeeds.
+	go announceWhenReady(ctx, kadDHT, prov)
 
 	n := &Node{Host: h, DHT: kadDHT, Bitswap: bswap, Provider: prov}
 	if mdnsSvc != nil {
 		n.mdns = mdnsSvc
 	}
 	return n, nil
+}
+
+// announceWhenReady waits for the DHT routing table to populate, then triggers
+// a reprovide so every stored CID is announced to the public DHT. It retries
+// until the announce succeeds (or ctx is cancelled), because the first attempt
+// at startup races DHT bootstrap and would otherwise fail with an empty table
+// and not retry until the next scheduled reprovide hours later.
+func announceWhenReady(ctx context.Context, kadDHT *dht.IpfsDHT, prov provider.System) {
+	// Wait for at least a few peers in the routing table.
+	for kadDHT.RoutingTable().Size() < 1 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	// Give bootstrap a moment to widen the table for better provide placement.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(3 * time.Second):
+	}
+
+	for {
+		err := prov.Reprovide(ctx)
+		if err == nil {
+			log.Info().Int("dht_peers", kadDHT.RoutingTable().Size()).
+				Msg("announced stored CIDs to the DHT")
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Warn().Err(err).Msg("announce to DHT failed, retrying in 30s")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+	}
 }
 
 // logReachability subscribes to the host event bus and logs NAT-reachability

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ipfs/go-cid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/ulbwa/ipfsgram/internal/cache"
@@ -89,9 +90,49 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 	}
 	logEvent.Msg("daemon started")
 
+	// Announce pin roots to the DHT first (a handful of CIDs), so gateways and
+	// the retrieval checker can discover the content by its root CID within
+	// seconds, without waiting for the full per-block reprovide to finish.
+	go provideRoots(ctx, n, st)
+
 	<-ctx.Done()
 	log.Info().Msg("shutting down")
 	return nil
+}
+
+// provideRoots waits for the DHT routing table to populate, then announces each
+// pin's root CID to the DHT. Roots are the entry points gateways look up, so
+// announcing the few of them first makes content discoverable quickly while the
+// node's full per-block reprovide proceeds in the background.
+func provideRoots(ctx context.Context, n *node.Node, st *store.Store) {
+	for n.DHT.RoutingTable().Size() < 1 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	pins, err := st.Pins(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("load pins for root announce")
+		return
+	}
+	var done int
+	for _, p := range pins {
+		c, err := cid.Cast(p.RootCID)
+		if err != nil {
+			continue
+		}
+		if err := n.Provider.Provide(ctx, c, true); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn().Err(err).Str("cid", c.String()).Msg("announce pin root")
+			continue
+		}
+		done++
+	}
+	log.Info().Int("roots", done).Msg("announced pin roots to the DHT")
 }
 
 // buildCache constructs the disk cache per the configured strategy.
