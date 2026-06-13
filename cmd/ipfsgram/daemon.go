@@ -64,7 +64,25 @@ func newDaemonCmd() *cobra.Command {
 	flags.String("cache-strategy", "", "cache eviction strategy: lru or ttl [$"+envPrefix+"CACHE_STRATEGY, default lru]")
 	flags.Duration("cache-ttl", 0, "entry lifetime for the ttl strategy [$"+envPrefix+"CACHE_TTL, default 1h]")
 	flags.StringArray("listen", nil, "libp2p listen multiaddr, repeatable [$"+envPrefix+"LISTEN comma-separated, default "+strings.Join(defaultListen, ",")+"]")
+	flags.Bool("autotls", true, "AutoTLS via libp2p.direct (secure WebSocket), like Kubo [$"+envPrefix+"AUTOTLS, default true]")
+	flags.Bool("delegated-routing", true, "announce/lookup via the HTTP delegated router (IPNI) in addition to the DHT [$"+envPrefix+"DELEGATED_ROUTING, default true]")
 	return cmd
+}
+
+// boolFlagOrEnv resolves a bool as flag (if explicitly set) → IPFSGRAM_<env>
+// ("1"/"true"/"yes"/"on" and their negatives) → def.
+func boolFlagOrEnv(cmd *cobra.Command, flag, env string, def bool) bool {
+	if cmd.Flags().Changed(flag) {
+		v, _ := cmd.Flags().GetBool(flag)
+		return v
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envPrefix + env))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 
 // stringFlagOrEnv returns the string flag if set, else the matching
@@ -125,6 +143,8 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	}
 
 	cfg.Listen = resolveListen(cmd)
+	cfg.AutoTLS = boolFlagOrEnv(cmd, "autotls", "AUTOTLS", true)
+	cfg.DelegatedRouting = boolFlagOrEnv(cmd, "delegated-routing", "DELEGATED_ROUTING", true)
 	return cfg, nil
 }
 

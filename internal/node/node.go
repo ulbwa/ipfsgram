@@ -24,6 +24,7 @@ import (
 	"github.com/ipfs/boxo/provider"
 	datastore "github.com/ipfs/go-datastore"
 	dssync "github.com/ipfs/go-datastore/sync"
+	forge "github.com/ipshipyard/p2p-forge/client"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/discovery"
@@ -53,6 +54,17 @@ type Config struct {
 	// It is the reprovider's KeyChanFunc; the caller builds it from the store's
 	// CID stream. Required.
 	ProvideKeys provider.KeyChanFunc
+	// DataDir is the daemon state directory; AutoTLS persists its provisioned
+	// libp2p.direct certificates under <DataDir>/p2p-forge-certs.
+	DataDir string
+	// AutoTLS enables p2p-forge (libp2p.direct) AutoTLS: the node provisions a
+	// browser-trusted certificate and serves secure WebSocket (WSS), mirroring
+	// Kubo's AutoTLS. Best-effort; never blocks or fails startup. Default true.
+	AutoTLS bool
+	// DelegatedRouting enables the HTTP delegated content router (IPNI via
+	// https://delegated-ipfs.dev) combined with the DHT for providing and
+	// lookups, mirroring Kubo's Routing.DelegatedRouters: ["auto"]. Default true.
+	DelegatedRouting bool
 }
 
 // Node bundles the libp2p stack: host, Kademlia DHT (server mode), Bitswap and
@@ -63,6 +75,7 @@ type Node struct {
 	Bitswap  *bitswap.Bitswap
 	Provider provider.System
 	mdns     interface{ Close() error }
+	certMgr  interface{ Stop() }
 }
 
 // mdnsNotifee connects to peers discovered on the local network via mDNS, the
@@ -124,9 +137,9 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		return out
 	}
 
-	h, err := libp2p.New(
+	listenAddrs := append([]string{}, cfg.ListenAddrs...)
+	opts := []libp2p.Option{
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(cfg.ListenAddrs...),
 		// The default transports already include WebRTC-direct (browser-grade
 		// ICE/STUN NAT traversal); we enable it by listening on a webrtc-direct
 		// multiaddr (see cmd defaultListen). It makes a node behind a home/CGNAT
@@ -148,7 +161,30 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 			kadDHT = d
 			return d, derr
 		}),
-	)
+	}
+
+	// AutoTLS (p2p-forge / libp2p.direct): provision a browser-trusted cert and
+	// serve secure WebSocket, mirroring Kubo. Best-effort — any failure to set it
+	// up only drops the libp2p.direct addresses; the node still serves over the
+	// other transports.
+	var certMgr *forge.P2PForgeCertMgr
+	if cfg.AutoTLS {
+		cm, cerr := newForgeCertMgr(cfg.DataDir)
+		if cerr != nil {
+			log.Warn().Err(cerr).Msg("autotls: init failed, continuing without libp2p.direct")
+		} else {
+			certMgr = cm
+			listenAddrs = append(listenAddrs, certMgr.AddrStrings()...)
+			// Explicit transport set (defaults minus ws, plus the forge WSS
+			// transport) — see forgeTransportOptions for why DefaultTransports
+			// cannot be combined with the forge WebSocket transport.
+			opts = append(opts, forgeTransportOptions(certMgr)...)
+			opts = append(opts, libp2p.AddrsFactory(certMgr.AddressFactory()))
+		}
+	}
+	opts = append(opts, libp2p.ListenAddrStrings(listenAddrs...))
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("node: start libp2p host: %w", err)
 	}
@@ -164,12 +200,31 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 
 	logReachability(h)
 
+	// Start AutoTLS cert provisioning now that the host exists (async, never fatal).
+	if certMgr != nil {
+		startForgeCertMgr(certMgr, h)
+	}
+
 	bswap := bitswap.New(ctx, bsnet.NewFromIpfsHost(h), kadDHT, cfg.Blockstore)
+
+	// Provider router: the DHT, optionally combined with the HTTP delegated
+	// router (IPNI) so reprovides reach the indexer that public gateways query,
+	// not just the Amino DHT. Best-effort: if the delegated router can't be built
+	// we fall back to DHT-only.
+	var provRouter routing.Routing = kadDHT
+	if cfg.DelegatedRouting {
+		if dr, derr := newDelegatedRouter(); derr != nil {
+			log.Warn().Err(derr).Msg("delegated routing: init failed, using DHT only")
+		} else {
+			provRouter = combineRouters(kadDHT, dr)
+			log.Info().Msg("delegated routing enabled (delegated-ipfs.dev + DHT)")
+		}
+	}
 
 	// The provide queue is in-memory only: on restart the reprovider streams
 	// the full CID set from the store again, so nothing is lost.
 	prov, err := provider.New(dssync.MutexWrap(datastore.NewMapDatastore()),
-		provider.Online(kadDHT),
+		provider.Online(provRouter),
 		provider.KeyProvider(cfg.ProvideKeys),
 		provider.ReproviderInterval(provider.DefaultReproviderInterval),
 	)
@@ -206,6 +261,9 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	n := &Node{Host: h, DHT: kadDHT, Bitswap: bswap, Provider: prov}
 	if mdnsSvc != nil {
 		n.mdns = mdnsSvc
+	}
+	if certMgr != nil {
+		n.certMgr = certMgr
 	}
 	return n, nil
 }
@@ -346,6 +404,9 @@ func logReachability(h host.Host) {
 // Close shuts the stack down in reverse start order, joining any errors.
 func (n *Node) Close() error {
 	var errs []error
+	if n.certMgr != nil {
+		n.certMgr.Stop()
+	}
 	if n.mdns != nil {
 		if err := n.mdns.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close mdns: %w", err))

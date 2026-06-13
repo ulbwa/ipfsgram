@@ -40,6 +40,12 @@ type Config struct {
 	CacheTTL time.Duration
 	// Listen are the libp2p listen multiaddrs.
 	Listen []string
+	// AutoTLS enables p2p-forge (libp2p.direct) secure-WebSocket AutoTLS,
+	// mirroring Kubo. Default true.
+	AutoTLS bool
+	// DelegatedRouting enables the HTTP delegated router (IPNI) alongside the
+	// DHT, mirroring Kubo's Routing.DelegatedRouters. Default true.
+	DelegatedRouting bool
 }
 
 // Run wires the disk cache, blockstore and libp2p node on top of the supplied
@@ -73,10 +79,13 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 	})
 
 	n, err := node.New(ctx, node.Config{
-		IdentityPath: filepath.Join(cfg.DataDir, "identity.key"),
-		ListenAddrs:  cfg.Listen,
-		Blockstore:   bs,
-		ProvideKeys:  ProvideKeys(st),
+		IdentityPath:     filepath.Join(cfg.DataDir, "identity.key"),
+		ListenAddrs:      cfg.Listen,
+		Blockstore:       bs,
+		ProvideKeys:      ProvideKeys(st),
+		DataDir:          cfg.DataDir,
+		AutoTLS:          cfg.AutoTLS,
+		DelegatedRouting: cfg.DelegatedRouting,
 	})
 	if err != nil {
 		return err
