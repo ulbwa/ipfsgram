@@ -14,6 +14,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/ipfs/boxo/bitswap"
@@ -194,6 +196,13 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	// in table" — and is retried until it succeeds.
 	go announceWhenReady(ctx, kadDHT, prov)
 
+	// Re-announce when the node's externally-visible addresses change. Public
+	// addresses (UPnP/AutoNAT/WebRTC/relay) appear asynchronously, often after
+	// the first announce, so without this the DHT keeps stale records that omit
+	// the node's directly-dialable addresses and gateways fall back to slow
+	// relays.
+	go reannounceOnAddrChange(ctx, h, prov)
+
 	n := &Node{Host: h, DHT: kadDHT, Bitswap: bswap, Provider: prov}
 	if mdnsSvc != nil {
 		n.mdns = mdnsSvc
@@ -237,6 +246,54 @@ func announceWhenReady(ctx context.Context, kadDHT *dht.IpfsDHT, prov provider.S
 		case <-ctx.Done():
 			return
 		case <-time.After(30 * time.Second):
+		}
+	}
+}
+
+// reannounceOnAddrChange re-provides all stored CIDs whenever the set of public
+// (non-private) addresses changes, so DHT provider records always carry the
+// node's current directly-dialable addresses. Re-announces are debounced to
+// coalesce bursts of address updates during startup.
+func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.System) {
+	sub, err := h.EventBus().Subscribe(new(event.EvtLocalAddressesUpdated))
+	if err != nil {
+		log.Warn().Err(err).Msg("subscribe to address-change events")
+		return
+	}
+	defer sub.Close()
+
+	publicSet := func() string {
+		var s []string
+		for _, a := range h.Addrs() {
+			if !manet.IsPrivateAddr(a) {
+				s = append(s, a.String())
+			}
+		}
+		sort.Strings(s)
+		return strings.Join(s, ",")
+	}
+
+	last := publicSet()
+	debounce := time.NewTimer(time.Hour)
+	debounce.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-sub.Out():
+			if !ok {
+				return
+			}
+			if cur := publicSet(); cur != last && cur != "" {
+				last = cur
+				debounce.Reset(10 * time.Second)
+			}
+		case <-debounce.C:
+			if err := prov.Reprovide(ctx); err != nil && ctx.Err() == nil {
+				log.Warn().Err(err).Msg("re-announce after address change")
+			} else if ctx.Err() == nil {
+				log.Info().Msg("re-announced CIDs after address change")
+			}
 		}
 	}
 }
