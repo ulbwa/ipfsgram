@@ -10,13 +10,9 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/ipfs/go-cid"
-	"github.com/libp2p/go-libp2p/core/event"
-	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/rs/zerolog/log"
 
 	"github.com/ulbwa/ipfsgram/internal/cache"
@@ -130,10 +126,11 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 }
 
 // provideRoots waits for the DHT routing table to populate, announces each pin's
-// root CID to the DHT, and re-announces the roots whenever the node's public
-// addresses change. Roots are the entry points gateways look up, so announcing
-// the few of them is fast (a handful of CIDs) and makes content discoverable
-// quickly while the node's full per-block reprovide proceeds in the background.
+// root CID to the DHT, and re-announces the roots whenever the node reports a
+// public-address change (via node.AddrChanged). Roots are the entry points
+// gateways look up, so announcing the few of them is fast (a handful of CIDs) and
+// makes content discoverable quickly while the node's full per-block reprovide
+// proceeds in the background.
 //
 // Re-announcing on address change is what makes a node behind NAT actually
 // reachable: a relay /p2p-circuit address is reserved a few minutes after
@@ -158,63 +155,19 @@ func provideRoots(ctx context.Context, n *node.Node, st *store.Store) {
 		}
 		var done int
 		for _, p := range pins {
-			c, err := cid.Cast(p.RootCID)
-			if err != nil {
-				continue
+			if _, ok := provideRoot(ctx, n, p.RootCID, "announce pin root"); ok {
+				done++
 			}
-			if err := n.Provider.Provide(ctx, c, true); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Warn().Err(err).Stringer("cid", c).Msg("announce pin root")
-				continue
-			}
-			done++
 		}
 		log.Info().Int("roots", done).Msg("announced pin roots to the DHT")
 	}
+
 	announce()
-
-	sub, err := n.Host.EventBus().Subscribe([]any{
-		new(event.EvtLocalAddressesUpdated),
-		new(event.EvtLocalReachabilityChanged),
-	})
-	if err != nil {
-		log.Warn().Err(err).Msg("subscribe to address changes for root re-announce")
-		return
-	}
-	defer sub.Close()
-
-	publicSet := func() string {
-		var s []string
-		for _, a := range n.Host.Addrs() {
-			if !manet.IsPrivateAddr(a) {
-				s = append(s, a.String())
-			}
-		}
-		sort.Strings(s)
-		return strings.Join(s, ",")
-	}
-
-	// Start from empty so the first observed public-address set (which may
-	// already be present by the time the subscription is established) triggers a
-	// re-announce.
-	last := ""
-	debounce := time.NewTimer(time.Hour)
-	debounce.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-sub.Out():
-			if !ok {
-				return
-			}
-			if cur := publicSet(); cur != last && cur != "" {
-				last = cur
-				debounce.Reset(5 * time.Second)
-			}
-		case <-debounce.C:
+		case <-n.AddrChanged():
 			announce()
 		}
 	}
@@ -240,18 +193,9 @@ func listenAndProvide(ctx context.Context, dsn string, n *node.Node) {
 		}
 		log.Info().Msg("listening for new-content notifications")
 		for root := range ch {
-			c, err := cid.Cast(root)
-			if err != nil {
-				continue
+			if c, ok := provideRoot(ctx, n, root, "announce new content"); ok {
+				log.Info().Stringer("cid", c).Msg("announced new content to the DHT")
 			}
-			if err := n.Provider.Provide(ctx, c, true); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Warn().Err(err).Stringer("cid", c).Msg("announce new content")
-				continue
-			}
-			log.Info().Stringer("cid", c).Msg("announced new content to the DHT")
 		}
 		// Channel closed: connection lost or ctx done. Back off before
 		// reconnecting so a flapping Postgres connection (which can close the
@@ -265,6 +209,24 @@ func listenAndProvide(ctx context.Context, dsn string, n *node.Node) {
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+// provideRoot casts a raw CID and announces it through the node's provider
+// queue. It returns the CID and whether the announce succeeded; a malformed CID
+// or a provide error yields false, with the error logged under msg unless the
+// context was cancelled (a cancelled provide is a clean shutdown, not a fault).
+func provideRoot(ctx context.Context, n *node.Node, raw []byte, msg string) (cid.Cid, bool) {
+	c, err := cid.Cast(raw)
+	if err != nil {
+		return cid.Undef, false
+	}
+	if err := n.Provider.Provide(ctx, c, true); err != nil {
+		if ctx.Err() == nil {
+			log.Warn().Err(err).Stringer("cid", c).Msg(msg)
+		}
+		return c, false
+	}
+	return c, true
 }
 
 // buildCache constructs the disk cache per the configured strategy.

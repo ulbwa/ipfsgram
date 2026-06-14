@@ -36,13 +36,13 @@ const (
 	defaultWarnThreshold = 0.9
 )
 
-// transport is the slice of *telegram.Client the publish pipeline uses.
+// transport is the subset of *telegram.Client the publish pipeline uses.
 type transport interface {
 	Upload(ctx context.Context, token string, channelTgID int64, name string, size int64, r io.Reader) (telegram.UploadResult, error)
 	CheckMessage(ctx context.Context, token string, channelTgID, messageID int64) error
 }
 
-// database is the slice of *store.Store the publish pipeline uses.
+// database is the subset of *store.Store the publish pipeline uses.
 type database interface {
 	ConfigInt64(ctx context.Context, key string) (int64, error)
 	ConfigFloat64(ctx context.Context, key string) (float64, error)

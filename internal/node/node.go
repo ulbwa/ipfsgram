@@ -31,6 +31,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/discovery"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
@@ -90,8 +91,12 @@ type Node struct {
 	DHT      *dht.IpfsDHT
 	Bitswap  *bitswap.Bitswap
 	Provider provider.System
-	mdns     interface{ Close() error }
-	certMgr  interface{ Stop() }
+	// addrChanged carries a debounced signal each time the node's public
+	// addresses change; the daemon consumes it to re-announce pin roots. Buffered
+	// to one so a burst coalesces and the watcher never blocks.
+	addrChanged chan struct{}
+	mdns        interface{ Close() error }
+	certMgr     interface{ Stop() }
 }
 
 // mdnsNotifee connects to peers discovered on the local network via mDNS, the
@@ -289,8 +294,6 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("node: bootstrap dht: %w", err)
 	}
 
-	logReachability(h)
-
 	// Start AutoTLS cert provisioning now that the host exists (async, never fatal).
 	if certMgr != nil {
 		startForgeCertMgr(certMgr, h)
@@ -342,20 +345,32 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	// in table" — and is retried until it succeeds.
 	go announceWhenReady(ctx, kadDHT, prov)
 
-	// Re-announce when the node's externally-visible addresses change. Public
-	// addresses (UPnP/AutoNAT/WebRTC/relay) appear asynchronously, often after
-	// the first announce, so without this the DHT keeps stale records that omit
-	// the node's directly-dialable addresses and gateways fall back to slow
-	// relays.
-	go reannounceOnAddrChange(ctx, h, prov)
-
-	n := &Node{Host: h, DHT: kadDHT, Bitswap: bswap, Provider: prov}
+	n := &Node{
+		Host:        h,
+		DHT:         kadDHT,
+		Bitswap:     bswap,
+		Provider:    prov,
+		addrChanged: make(chan struct{}, 1),
+	}
 	if mdnsSvc != nil {
 		n.mdns = mdnsSvc
 	}
 	if certMgr != nil {
 		n.certMgr = certMgr
 	}
+
+	// One watcher for the host's address/reachability events: it logs them,
+	// re-provides all stored CIDs when the public address set changes (so DHT
+	// records carry the node's current dialable addresses), and signals
+	// AddrChanged so the daemon can re-announce pin roots. Public addresses
+	// (UPnP/AutoNAT/WebRTC/relay) appear asynchronously, often after the first
+	// announce, so without this the DHT keeps stale, undialable records.
+	go n.watchAddrChanges(ctx)
+
+	// Keep the configured static relays connected so AutoRelay re-reserves
+	// promptly after a relay restart instead of sitting on a dead reservation.
+	go keepRelaysConnected(ctx, h, staticRelays)
+
 	return n, nil
 }
 
@@ -366,9 +381,21 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 // drop relays, so the relay can end up with a reservation but no live connection
 // to forward over (the circuit dial then fails with CONNECTION_FAILED). When no
 // static relays are configured it falls back to discovering relays via the DHT.
+//
+// Two knobs govern recovery after the relay restarts. WithBackoff defaults to one
+// hour: AutoRelay records the backoff *before* attempting a reservation, so a
+// single failed reserve against a relay that is still restarting benches the only
+// static relay for an hour — exactly the "needs a manual daemon restart" symptom.
+// 20s lets it retry promptly. WithMinInterval(0) removes the 30s gate before the
+// static peer source is re-queried for a candidate after a disconnect; the static
+// source is a cheap constant list, so there is no reason to rate-limit it.
+// (EnableAutoRelayWithStaticRelays already sets NumRelays = len(staticRelays).)
 func autoRelayOption(staticRelays []peer.AddrInfo, peerSource autorelay.PeerSource) libp2p.Option {
 	if len(staticRelays) > 0 {
-		return libp2p.EnableAutoRelayWithStaticRelays(staticRelays, autorelay.WithNumRelays(len(staticRelays)))
+		return libp2p.EnableAutoRelayWithStaticRelays(staticRelays,
+			autorelay.WithBackoff(20*time.Second),
+			autorelay.WithMinInterval(0),
+		)
 	}
 	return libp2p.EnableAutoRelayWithPeerSource(peerSource, autorelay.WithMinInterval(0))
 }
@@ -453,15 +480,22 @@ func announceWhenReady(ctx context.Context, kadDHT *dht.IpfsDHT, prov provider.S
 	}
 }
 
-// reannounceOnAddrChange re-provides all stored CIDs whenever the node's public
-// addresses or NAT reachability change, so DHT provider records always carry the
-// node's current directly-dialable addresses. This matters because public
-// addresses (UPnP/AutoNAT/WebRTC) and a Public reachability verdict appear
-// asynchronously, usually AFTER the first announce — without a re-announce the
-// DHT keeps relay-only records that browser/proxy gateways cannot dial.
-// Re-announces are debounced to coalesce startup bursts.
-func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.System) {
-	sub, err := h.EventBus().Subscribe([]any{
+// addrChangeDebounce coalesces the burst of address/reachability events at
+// startup (and after a relay reservation) into a single re-announce.
+const addrChangeDebounce = 5 * time.Second
+
+// watchAddrChanges is the node's single subscriber to the host's
+// address/reachability events. It logs reachability and externally-visible
+// addresses, re-provides all stored CIDs when the public address set changes —
+// so DHT provider records always carry the node's current directly-dialable
+// addresses — and signals AddrChanged so the daemon can re-announce pin roots.
+// Public addresses (UPnP/AutoNAT/WebRTC) and a Public reachability verdict appear
+// asynchronously, usually after the first announce; without a re-announce the DHT
+// keeps relay-only records that browser/proxy gateways cannot dial. Re-announces
+// are debounced to coalesce startup bursts. The goroutine exits when ctx is
+// cancelled or the subscription closes (on host shutdown).
+func (n *Node) watchAddrChanges(ctx context.Context) {
+	sub, err := n.Host.EventBus().Subscribe([]any{
 		new(event.EvtLocalAddressesUpdated),
 		new(event.EvtLocalReachabilityChanged),
 	})
@@ -470,17 +504,6 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 		return
 	}
 	defer sub.Close()
-
-	publicSet := func() string {
-		var s []string
-		for _, a := range h.Addrs() {
-			if !manet.IsPrivateAddr(a) {
-				s = append(s, a.String())
-			}
-		}
-		sort.Strings(s)
-		return strings.Join(s, ",")
-	}
 
 	// Start from empty so the first observed set of public addresses always
 	// triggers a re-announce, even if those addresses were already present by
@@ -492,16 +515,19 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-sub.Out():
+		case e, ok := <-sub.Out():
 			if !ok {
 				return
 			}
-			if cur := publicSet(); cur != last && cur != "" {
+			logReachabilityEvent(e)
+			if cur := publicAddrSet(n.Host); cur != last && cur != "" {
 				last = cur
-				debounce.Reset(10 * time.Second)
+				debounce.Reset(addrChangeDebounce)
 			}
 		case <-debounce.C:
-			if err := prov.Reprovide(ctx); err != nil {
+			// Signal the cheap root re-announce first, then reprovide every CID.
+			n.signalAddrChanged()
+			if err := n.Provider.Reprovide(ctx); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -519,40 +545,102 @@ func reannounceOnAddrChange(ctx context.Context, h host.Host, prov provider.Syst
 	}
 }
 
-// logReachability subscribes to the host event bus and logs NAT-reachability
-// changes and externally-visible (public/relay) addresses, so an operator can
-// tell whether the node became dialable from other networks. The goroutine
-// exits when the subscription closes (on host shutdown).
-func logReachability(h host.Host) {
-	sub, err := h.EventBus().Subscribe([]any{
-		new(event.EvtLocalReachabilityChanged),
-		new(event.EvtLocalAddressesUpdated),
-	})
-	if err != nil {
-		log.Warn().Err(err).Msg("subscribe to reachability events")
-		return
+// AddrChanged delivers a signal whenever the node's public addresses or NAT
+// reachability change (debounced). At most one signal is buffered, so consumers
+// coalesce bursts. The daemon uses it to re-announce pin roots.
+func (n *Node) AddrChanged() <-chan struct{} { return n.addrChanged }
+
+func (n *Node) signalAddrChanged() {
+	select {
+	case n.addrChanged <- struct{}{}:
+	default:
 	}
-	go func() {
-		defer sub.Close()
-		for e := range sub.Out() {
-			switch ev := e.(type) {
-			case event.EvtLocalReachabilityChanged:
-				log.Info().Str("reachability", ev.Reachability.String()).
-					Msg("nat reachability changed")
-			case event.EvtLocalAddressesUpdated:
-				var public []string
-				for _, ua := range ev.Current {
-					if a := ua.Address; a != nil && !manet.IsPrivateAddr(a) {
-						public = append(public, a.String())
-					}
-				}
-				if len(public) > 0 {
-					log.Info().Strs("addrs", public).
-						Msg("externally reachable addresses")
-				}
+}
+
+// publicAddrSet is the sorted, comma-joined set of the host's non-private
+// addresses — a stable key for detecting public-address changes.
+func publicAddrSet(h host.Host) string {
+	var s []string
+	for _, a := range h.Addrs() {
+		if !manet.IsPrivateAddr(a) {
+			s = append(s, a.String())
+		}
+	}
+	sort.Strings(s)
+	return strings.Join(s, ",")
+}
+
+// logReachabilityEvent logs a NAT-reachability change or the externally-visible
+// (public/relay) addresses, so an operator can tell whether the node became
+// dialable from other networks.
+func logReachabilityEvent(e any) {
+	switch ev := e.(type) {
+	case event.EvtLocalReachabilityChanged:
+		log.Info().Str("reachability", ev.Reachability.String()).
+			Msg("nat reachability changed")
+	case event.EvtLocalAddressesUpdated:
+		var public []string
+		for _, ua := range ev.Current {
+			if a := ua.Address; a != nil && !manet.IsPrivateAddr(a) {
+				public = append(public, a.String())
 			}
 		}
-	}()
+		if len(public) > 0 {
+			log.Info().Strs("addrs", public).Msg("externally reachable addresses")
+		}
+	}
+}
+
+// keepRelaysConnected starts a supervisor goroutine per configured static relay
+// that keeps a live connection to it, so AutoRelay can (re-)reserve through it
+// without delay. When a relay restarts, AutoRelay can otherwise sit on the dead
+// reservation — the relay returns NO_RESERVATION to dialers — until something
+// re-establishes the connection. Each goroutine stops when ctx is cancelled.
+func keepRelaysConnected(ctx context.Context, h host.Host, relays []peer.AddrInfo) {
+	for _, r := range relays {
+		go keepRelayConnected(ctx, h, r)
+	}
+}
+
+// keepRelayConnected polls one relay's connection and redials it with capped
+// exponential backoff whenever it drops. Dialing an already-connected relay (its
+// connection is connmgr-protected once reserved) is a cheap no-op, so this never
+// fights the connection manager.
+func keepRelayConnected(ctx context.Context, h host.Host, relay peer.AddrInfo) {
+	const (
+		checkInterval = 15 * time.Second
+		maxBackoff    = 30 * time.Second
+	)
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	for {
+		backoff := time.Second
+		for h.Network().Connectedness(relay.ID) != network.Connected {
+			dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := h.Connect(dialCtx, relay)
+			cancel()
+			if err == nil {
+				log.Info().Stringer("relay", relay.ID).Msg("reconnected to static relay")
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			log.Debug().Stringer("relay", relay.ID).Err(err).
+				Dur("retry_in", backoff).Msg("relay reconnect failed")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, maxBackoff)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // Close shuts the stack down in reverse start order, joining any errors.
