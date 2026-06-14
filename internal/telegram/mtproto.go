@@ -260,10 +260,3 @@ func (m *MTProto) CheckMessage(ctx context.Context, token string, channelTgID, m
 		return err
 	})
 }
-
-// Upload via MTProto is not implemented: the hybrid always routes uploads
-// through Bot API (sendDocument yields a file_id, which is needed for
-// subsequent downloads by other bots).
-func (m *MTProto) Upload(context.Context, string, int64, string, int64, io.Reader) (UploadResult, error) {
-	return UploadResult{}, errors.New("tg: mtproto: upload not supported, use bot api client")
-}

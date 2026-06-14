@@ -80,19 +80,22 @@ func newDaemonCmd() *cobra.Command {
 }
 
 // boolFlagOrEnv resolves a bool as flag (if explicitly set) → IPFSGRAM_<env>
-// ("1"/"true"/"yes"/"on" and their negatives) → def.
-func boolFlagOrEnv(cmd *cobra.Command, flag, env string, def bool) bool {
+// (strconv.ParseBool semantics) → def. A non-empty environment value that is
+// not a valid bool is an error, so a typo fails fast rather than silently
+// falling back to def.
+func boolFlagOrEnv(cmd *cobra.Command, flag, env string, def bool) (bool, error) {
 	if cmd.Flags().Changed(flag) {
 		v, _ := cmd.Flags().GetBool(flag)
-		return v
+		return v, nil
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(envPrefix + env))) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
+	if s := strings.TrimSpace(os.Getenv(envPrefix + env)); s != "" {
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			return false, fmt.Errorf("parse $%s%s: %w", envPrefix, env, err)
+		}
+		return v, nil
 	}
-	return def
+	return def, nil
 }
 
 // stringFlagOrEnv returns the string flag if set, else the matching
@@ -111,6 +114,7 @@ func stringFlagOrEnv(cmd *cobra.Command, flag, env, def string) string {
 func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	flags := cmd.Flags()
 	var cfg daemon.Config
+	var err error
 
 	dataDir := stringFlagOrEnv(cmd, "data-dir", "DATA_DIR", "")
 	if dataDir == "" {
@@ -125,6 +129,13 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 	// Empty CacheDir stays empty: daemon.Run defaults it to <data-dir>/cache.
 	cfg.CacheDir = stringFlagOrEnv(cmd, "cache-dir", "CACHE_DIR", "")
 	cfg.CacheStrategy = stringFlagOrEnv(cmd, "cache-strategy", "CACHE_STRATEGY", "lru")
+	// Validate the strategy here so a typo fails before any network/db work;
+	// buildCache re-checks as defense in depth.
+	switch cfg.CacheStrategy {
+	case "", "lru", "ttl":
+	default:
+		return daemon.Config{}, fmt.Errorf("unknown cache strategy %q (want lru or ttl)", cfg.CacheStrategy)
+	}
 
 	cfg.CacheMaxBytes, _ = flags.GetInt64("cache-max-bytes")
 	if !flags.Changed("cache-max-bytes") {
@@ -154,8 +165,12 @@ func daemonConfigFromFlags(cmd *cobra.Command) (daemon.Config, error) {
 
 	cfg.Listen = resolveListen(cmd)
 	cfg.Relays = resolveRelays(cmd)
-	cfg.AutoTLS = boolFlagOrEnv(cmd, "autotls", "AUTOTLS", true)
-	cfg.DelegatedRouting = boolFlagOrEnv(cmd, "delegated-routing", "DELEGATED_ROUTING", true)
+	if cfg.AutoTLS, err = boolFlagOrEnv(cmd, "autotls", "AUTOTLS", true); err != nil {
+		return daemon.Config{}, err
+	}
+	if cfg.DelegatedRouting, err = boolFlagOrEnv(cmd, "delegated-routing", "DELEGATED_ROUTING", true); err != nil {
+		return daemon.Config{}, err
+	}
 	return cfg, nil
 }
 

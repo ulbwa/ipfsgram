@@ -53,9 +53,13 @@ func redactToken(token string, err error) error {
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) && strings.Contains(ue.URL, token) {
-		ue.URL = strings.ReplaceAll(ue.URL, token, "<redacted>")
-		if !strings.Contains(err.Error(), token) {
-			return err
+		// Copy before modifying so the shared error object net/http (and the
+		// caller) may still reference stays untouched. The copy keeps ue.Err, so
+		// the errors.Is/As chain is preserved.
+		ue2 := *ue
+		ue2.URL = strings.ReplaceAll(ue.URL, token, "<redacted>")
+		if !strings.Contains(ue2.Error(), token) {
+			return &ue2
 		}
 	}
 	return errors.New(strings.ReplaceAll(err.Error(), token, "<redacted>"))

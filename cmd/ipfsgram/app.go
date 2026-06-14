@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/rs/zerolog/log"
@@ -86,6 +87,11 @@ func (a *app) buildTransport(ctx context.Context, sessionDir string) (*telegram.
 		apiURL = "https://api.telegram.org"
 	} else if err != nil {
 		return nil, err
+	} else if err := configValidators["bot_api_url"](apiURL); err != nil {
+		// Re-validate the stored value with the same check as the config write
+		// path; a present-but-garbage value (manual SQL, migration) would
+		// otherwise surface later as an opaque dial error.
+		return nil, fmt.Errorf("invalid stored bot_api_url: %w", err)
 	}
 
 	enabled, err := a.Store.ConfigBool(ctx, "mtproto_enabled")
