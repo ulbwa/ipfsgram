@@ -82,7 +82,7 @@ func (f *fakeStore) DeleteCar(_ context.Context, carID int64) error {
 
 func TestUnpin(t *testing.T) {
 	st := &fakeStore{}
-	s := &Service{Store: st}
+	s := New(st)
 	root := []byte("root-cid")
 	if err := s.Unpin(context.Background(), root); err != nil {
 		t.Fatalf("Unpin: %v", err)
@@ -94,7 +94,7 @@ func TestUnpin(t *testing.T) {
 
 func TestUnpinSurfacesNotFound(t *testing.T) {
 	st := &fakeStore{removePinErr: store.ErrNotFound}
-	s := &Service{Store: st}
+	s := New(st)
 	if err := s.Unpin(context.Background(), []byte("x")); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Unpin err = %v, want ErrNotFound", err)
 	}
@@ -102,7 +102,7 @@ func TestUnpinSurfacesNotFound(t *testing.T) {
 
 func TestChannelRemovePlan(t *testing.T) {
 	st := &fakeStore{statsPins: 3, statsBytes: 4096}
-	s := &Service{Store: st}
+	s := New(st)
 	pins, bytes, err := s.ChannelRemovePlan(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("ChannelRemovePlan: %v", err)
@@ -117,7 +117,7 @@ func TestChannelRemovePlan(t *testing.T) {
 
 func TestChannelRemoveExecute(t *testing.T) {
 	st := &fakeStore{}
-	s := &Service{Store: st}
+	s := New(st)
 	if err := s.ChannelRemoveExecute(context.Background(), 7); err != nil {
 		t.Fatalf("ChannelRemoveExecute: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestChannelRemoveExecute(t *testing.T) {
 
 func TestChannelRemoveExecuteSkipsOrphanCleanupOnError(t *testing.T) {
 	st := &fakeStore{removeChannelErr: store.ErrNotFound}
-	s := &Service{Store: st}
+	s := New(st)
 	if err := s.ChannelRemoveExecute(context.Background(), 7); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -145,7 +145,7 @@ func TestBotRemovePlan(t *testing.T) {
 		{ID: 1, Size: 100},
 		{ID: 2, Size: 250},
 	}}
-	s := &Service{Store: st}
+	s := New(st)
 	affected, bytes, err := s.BotRemovePlan(context.Background(), 9)
 	if err != nil {
 		t.Fatalf("BotRemovePlan: %v", err)
@@ -163,7 +163,7 @@ func TestBotRemovePlan(t *testing.T) {
 
 func TestBotRemovePlanError(t *testing.T) {
 	st := &fakeStore{accessibleErr: errors.New("boom")}
-	s := &Service{Store: st}
+	s := New(st)
 	if _, _, err := s.BotRemovePlan(context.Background(), 1); err == nil {
 		t.Fatal("BotRemovePlan: want error")
 	}
@@ -171,7 +171,7 @@ func TestBotRemovePlanError(t *testing.T) {
 
 func TestBotRemoveExecute(t *testing.T) {
 	st := &fakeStore{}
-	s := &Service{Store: st}
+	s := New(st)
 	if err := s.BotRemoveExecute(context.Background(), 5); err != nil {
 		t.Fatalf("BotRemoveExecute: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestBotRemoveExecute(t *testing.T) {
 
 func TestPurgeCars(t *testing.T) {
 	st := &fakeStore{}
-	s := &Service{Store: st}
+	s := New(st)
 	cars := []store.Car{{ID: 1}, {ID: 2}, {ID: 3}}
 	if err := s.PurgeCars(context.Background(), cars); err != nil {
 		t.Fatalf("PurgeCars: %v", err)
@@ -194,7 +194,7 @@ func TestPurgeCars(t *testing.T) {
 
 func TestPurgeCarsToleratesNotFound(t *testing.T) {
 	st := &fakeStore{deleteCarErrs: map[int64]error{2: store.ErrNotFound}}
-	s := &Service{Store: st}
+	s := New(st)
 	cars := []store.Car{{ID: 1}, {ID: 2}, {ID: 3}}
 	if err := s.PurgeCars(context.Background(), cars); err != nil {
 		t.Fatalf("PurgeCars: %v, want nil (ErrNotFound tolerated)", err)
@@ -207,7 +207,7 @@ func TestPurgeCarsToleratesNotFound(t *testing.T) {
 func TestPurgeCarsSurfacesOtherErrors(t *testing.T) {
 	boom := errors.New("disk full")
 	st := &fakeStore{deleteCarErrs: map[int64]error{2: boom}}
-	s := &Service{Store: st}
+	s := New(st)
 	cars := []store.Car{{ID: 1}, {ID: 2}, {ID: 3}}
 	err := s.PurgeCars(context.Background(), cars)
 	if !errors.Is(err, boom) {

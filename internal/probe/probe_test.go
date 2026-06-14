@@ -62,12 +62,7 @@ func (t *fakeTransport) CheckMessage(_ context.Context, token string, _, _ int64
 }
 
 func newService(st storage, tr transport) *Service {
-	return &Service{
-		Store:     st,
-		Transport: tr,
-		Loads:     selector.NewLoadCounter(),
-		Logger:    zerolog.New(io.Discard),
-	}
+	return New(st, tr, selector.NewLoadCounter(), zerolog.New(io.Discard))
 }
 
 func member(botID int64) store.BotChannel {

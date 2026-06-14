@@ -44,13 +44,25 @@ const (
 	CheckTooLarge              // file exceeds current transport limit — recoverable
 )
 
-// Service probes car messages. Store is *store.Store and Transport a telegram
-// client in production; Loads is the shared selector load counter.
+// Service probes car messages. store is *store.Store and transport a telegram
+// client in production; loads is the shared selector load counter.
 type Service struct {
-	Store     storage
-	Transport transport
-	Loads     *selector.LoadCounter
-	Logger    zerolog.Logger
+	store     storage
+	transport transport
+	loads     *selector.LoadCounter
+	logger    zerolog.Logger
+}
+
+// New returns a Service backed by the given store and Telegram transport.
+// *store.Store satisfies store; *telegram.Client satisfies transport; loads is
+// the shared selector load counter.
+func New(st storage, tr transport, loads *selector.LoadCounter, logger zerolog.Logger) *Service {
+	return &Service{
+		store:     st,
+		transport: tr,
+		loads:     loads,
+		logger:    logger,
+	}
 }
 
 // CarMessage checks whether the car's Telegram message is alive, trying bots
@@ -64,26 +76,26 @@ func (s *Service) CarMessage(
 	if car.MessageID == nil {
 		return CheckNoAccess, nil
 	}
-	members, err := s.Store.ChannelMembers(ctx, car.ChannelID)
+	members, err := s.store.ChannelMembers(ctx, car.ChannelID)
 	if err != nil {
-		s.Logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load bot membership")
+		s.logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load bot membership")
 		return CheckNoAccess, nil
 	}
-	fileIDs, err := s.Store.CarFileIDs(ctx, car.ID)
+	fileIDs, err := s.store.CarFileIDs(ctx, car.ID)
 	if err != nil {
-		s.Logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load file_ids")
+		s.logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load file_ids")
 		fileIDs = nil
 	}
 
 	remaining := append([]store.Bot(nil), bots...)
 	for {
-		bot, _, err := selector.PickDownloadBot(time.Now(), remaining, members, fileIDs, s.Loads)
+		bot, _, err := selector.PickDownloadBot(time.Now(), remaining, members, fileIDs, s.loads)
 		if err != nil {
 			earliest := earliestRecovery(remaining, members, func(m store.BotChannel) bool {
 				return m.Member && m.CanRead
 			})
 			if earliest == nil {
-				s.Logger.Warn().Int64("car_id", car.ID).
+				s.logger.Warn().Int64("car_id", car.ID).
 					Msg("no bot can check car message — treating as no_bot_access")
 				return CheckNoAccess, nil
 			}
@@ -106,29 +118,29 @@ func (s *Service) CarMessage(
 func (s *Service) checkWithBot(
 	ctx context.Context, car store.Car, ch store.Channel, bot store.Bot, remaining *[]store.Bot,
 ) (Check, bool) {
-	cerr := s.Transport.CheckMessage(ctx, bot.Token, ch.TgID, *car.MessageID)
+	cerr := s.transport.CheckMessage(ctx, bot.Token, ch.TgID, *car.MessageID)
 	var fw *telegram.FloodWaitError
 	switch {
 	case cerr == nil:
-		s.Loads.Record(bot.ID)
+		s.loads.Record(bot.ID)
 		return CheckOK, true
 	case errors.Is(cerr, telegram.ErrMessageDeleted):
 		return CheckDeleted, true
 	case errors.Is(cerr, telegram.ErrTooLarge):
 		return CheckTooLarge, true
 	case errors.As(cerr, &fw):
-		s.Loads.RecordError(bot.ID)
+		s.loads.RecordError(bot.ID)
 		until := time.Now().Add(fw.RetryAfter)
-		if err := s.Store.SetBotUnavailable(ctx, bot.ID, until); err != nil {
-			s.Logger.Warn().Err(err).Msg("could not record flood-wait")
+		if err := s.store.SetBotUnavailable(ctx, bot.ID, until); err != nil {
+			s.logger.Warn().Err(err).Msg("could not record flood-wait")
 		}
 		markUnavailable(*remaining, bot.ID, until)
 	case errors.Is(cerr, telegram.ErrNoAccess):
-		s.Loads.RecordError(bot.ID)
+		s.loads.RecordError(bot.ID)
 		*remaining = removeBot(*remaining, bot.ID)
 	default:
-		s.Loads.RecordError(bot.ID)
-		s.Logger.Warn().Err(cerr).Int64("car_id", car.ID).Str("bot", bot.Username).
+		s.loads.RecordError(bot.ID)
+		s.logger.Warn().Err(cerr).Int64("car_id", car.ID).Str("bot", bot.Username).
 			Msg("error checking message, trying another bot")
 		*remaining = removeBot(*remaining, bot.ID)
 	}
@@ -143,7 +155,7 @@ func (s *Service) waitForFloodWait(ctx context.Context, until time.Time) error {
 		if remaining <= 0 {
 			return nil
 		}
-		s.Logger.Info().Int("seconds", int(remaining.Seconds())+1).
+		s.logger.Info().Int("seconds", int(remaining.Seconds())+1).
 			Msg("all bots flood-waited, waiting")
 		timer := time.NewTimer(min(remaining, 10*time.Second))
 		select {

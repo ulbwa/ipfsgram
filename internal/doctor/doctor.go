@@ -51,14 +51,26 @@ type transport interface {
 	CheckMessage(ctx context.Context, token string, channelTgID, messageID int64) error
 }
 
-// Service performs the doctor's diagnostics. Store is *store.Store and
-// Transport a telegram client in production; Loads is the shared selector load
+// Service performs the doctor's diagnostics. store is *store.Store and
+// transport a telegram client in production; loads is the shared selector load
 // counter (required by the recovery probe).
 type Service struct {
-	Store     storage
-	Transport transport
-	Loads     *selector.LoadCounter
-	Logger    zerolog.Logger
+	store     storage
+	transport transport
+	loads     *selector.LoadCounter
+	logger    zerolog.Logger
+}
+
+// New returns a Service backed by the given store and Telegram transport.
+// *store.Store satisfies store; *telegram.Client satisfies transport; loads is
+// the shared selector load counter required by the recovery probe.
+func New(st storage, tr transport, loads *selector.LoadCounter, logger zerolog.Logger) *Service {
+	return &Service{
+		store:     st,
+		transport: tr,
+		loads:     loads,
+		logger:    logger,
+	}
 }
 
 // MembershipChange describes a bot's gained or lost membership of a channel,
@@ -78,14 +90,14 @@ type MembershipReport struct {
 // in-flight publishes whose pending rows were never completed. It takes no lock
 // so the caller can preview and confirm before calling CleanOrphans.
 func (s *Service) Orphans(ctx context.Context, olderThan time.Duration) ([]store.Car, error) {
-	return s.Store.OrphanPendingCars(ctx, olderThan)
+	return s.store.OrphanPendingCars(ctx, olderThan)
 }
 
 // CleanOrphans deletes the given orphaned pending car rows (blocks and file_ids
 // cascade). store.ErrNotFound on any row is tolerated (already removed).
 func (s *Service) CleanOrphans(ctx context.Context, cars []store.Car) error {
 	for _, c := range cars {
-		if err := s.Store.DeleteCar(ctx, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := s.store.DeleteCar(ctx, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
 	}
@@ -96,11 +108,11 @@ func (s *Service) CleanOrphans(ctx context.Context, cars []store.Car) error {
 // permission matrix, and reports the membership diffs (gained/lost access).
 func (s *Service) RevalidateMembership(ctx context.Context) (MembershipReport, error) {
 	var report MembershipReport
-	bots, err := s.Store.Bots(ctx)
+	bots, err := s.store.Bots(ctx)
 	if err != nil {
 		return report, err
 	}
-	channels, err := s.Store.Channels(ctx)
+	channels, err := s.store.Channels(ctx)
 	if err != nil {
 		return report, err
 	}
@@ -108,7 +120,7 @@ func (s *Service) RevalidateMembership(ctx context.Context) (MembershipReport, e
 	// Previous membership matrix, gathered per channel.
 	wasMember := make(map[[2]int64]bool)
 	for _, ch := range channels {
-		members, err := s.Store.ChannelMembers(ctx, ch.ID)
+		members, err := s.store.ChannelMembers(ctx, ch.ID)
 		if err != nil {
 			return report, err
 		}
@@ -119,16 +131,16 @@ func (s *Service) RevalidateMembership(ctx context.Context) (MembershipReport, e
 
 	for _, b := range bots {
 		for _, ch := range channels {
-			info, perr := s.Transport.ProbeChannel(ctx, b.Token, ch.TgID)
+			info, perr := s.transport.ProbeChannel(ctx, b.Token, ch.TgID)
 			if perr != nil {
 				if !errors.Is(perr, telegram.ErrNoAccess) {
-					s.Logger.Warn().Err(perr).Str("bot", b.Username).Int64("channel_tg_id", ch.TgID).
+					s.logger.Warn().Err(perr).Str("bot", b.Username).Int64("channel_tg_id", ch.TgID).
 						Msg("could not probe access, skipping pair")
 					continue
 				}
 				info = telegram.ChannelInfo{}
 			}
-			if err := s.Store.UpsertBotChannel(ctx, store.BotChannel{
+			if err := s.store.UpsertBotChannel(ctx, store.BotChannel{
 				BotID: b.ID, ChannelID: ch.ID,
 				CanPost: info.CanPost, CanRead: info.CanRead, CanDelete: info.CanDelete,
 				Member: info.Member, VerifiedAt: time.Now(),
@@ -156,7 +168,7 @@ func (s *Service) RevalidateMembership(ctx context.Context) (MembershipReport, e
 // causes the car (and its cascading rows) to be removed. It returns the number
 // of cars restored and deleted.
 func (s *Service) Recover(ctx context.Context) (restored int, deleted int, err error) {
-	cars, err := s.Store.CarsWithStatus(ctx, store.CarNoBotAccess, store.CarTooLarge)
+	cars, err := s.store.CarsWithStatus(ctx, store.CarNoBotAccess, store.CarTooLarge)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -164,11 +176,11 @@ func (s *Service) Recover(ctx context.Context) (restored int, deleted int, err e
 		return 0, 0, nil
 	}
 
-	bots, err := s.Store.Bots(ctx)
+	bots, err := s.store.Bots(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
-	channels, err := s.Store.Channels(ctx)
+	channels, err := s.store.Channels(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -177,12 +189,7 @@ func (s *Service) Recover(ctx context.Context) (restored int, deleted int, err e
 		chByID[ch.ID] = ch
 	}
 
-	pr := &probe.Service{
-		Store:     s.Store,
-		Transport: s.Transport,
-		Loads:     s.Loads,
-		Logger:    s.Logger,
-	}
+	pr := probe.New(s.store, s.transport, s.loads, s.logger)
 
 	for _, car := range cars {
 		ch, ok := chByID[car.ChannelID]
@@ -213,26 +220,26 @@ func (s *Service) Recover(ctx context.Context) (restored int, deleted int, err e
 func (s *Service) applyRecoveryCheck(ctx context.Context, car store.Car, check probe.Check) (restored, deleted bool, err error) {
 	switch check {
 	case probe.CheckOK:
-		if err := s.Store.SetCarStatus(ctx, car.ID, store.CarPublished); err != nil {
+		if err := s.store.SetCarStatus(ctx, car.ID, store.CarPublished); err != nil {
 			return false, false, err
 		}
 		return true, false, nil
 	case probe.CheckDeleted:
-		s.Logger.Warn().Int64("car_id", car.ID).
+		s.logger.Warn().Int64("car_id", car.ID).
 			Msg("car message physically deleted — removing records")
-		if err := s.Store.DeleteCar(ctx, car.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := s.store.DeleteCar(ctx, car.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return false, false, err
 		}
 		return false, true, nil
 	case probe.CheckTooLarge:
 		if car.Status != store.CarTooLarge {
-			if err := s.Store.SetCarStatus(ctx, car.ID, store.CarTooLarge); err != nil {
+			if err := s.store.SetCarStatus(ctx, car.ID, store.CarTooLarge); err != nil {
 				return false, false, err
 			}
 		}
 	case probe.CheckNoAccess:
 		if car.Status != store.CarNoBotAccess {
-			if err := s.Store.SetCarStatus(ctx, car.ID, store.CarNoBotAccess); err != nil {
+			if err := s.store.SetCarStatus(ctx, car.ID, store.CarNoBotAccess); err != nil {
 				return false, false, err
 			}
 		}

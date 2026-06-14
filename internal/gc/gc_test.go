@@ -76,11 +76,7 @@ func TestGCDeletesUnpinnedCar(t *testing.T) {
 	}
 	tr := &fakeTransport{}
 
-	s := &Service{
-		Store:     st,
-		Transport: tr,
-		Logger:    zerolog.New(io.Discard),
-	}
+	s := New(st, tr, zerolog.New(io.Discard))
 
 	deleted, err := s.GC(context.Background())
 	if err != nil {
@@ -108,7 +104,7 @@ func TestCandidatesExcludesPending(t *testing.T) {
 			{ID: 2, Status: store.CarPending, Size: 999},
 		},
 	}
-	s := &Service{Store: st, Logger: zerolog.New(io.Discard)}
+	s := New(st, nil, zerolog.New(io.Discard))
 	got, total, err := s.Candidates(context.Background())
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)

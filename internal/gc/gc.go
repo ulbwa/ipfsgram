@@ -38,12 +38,22 @@ type transport interface {
 	DeleteMessage(ctx context.Context, token string, channelTgID, messageID int64) error
 }
 
-// Service performs garbage collection. Store is *store.Store and Transport a
+// Service performs garbage collection. store is *store.Store and transport a
 // telegram client in production.
 type Service struct {
-	Store     storage
-	Transport transport
-	Logger    zerolog.Logger
+	store     storage
+	transport transport
+	logger    zerolog.Logger
+}
+
+// New returns a Service backed by the given store and Telegram transport.
+// *store.Store satisfies store; *telegram.Client satisfies transport.
+func New(st storage, tr transport, logger zerolog.Logger) *Service {
+	return &Service{
+		store:     st,
+		transport: tr,
+		logger:    logger,
+	}
 }
 
 // Candidates returns the unpinned cars eligible for collection and their total
@@ -51,7 +61,7 @@ type Service struct {
 // concurrent publishers. Pending cars belong to an in-flight or interrupted
 // publish (no pin yet, no message to delete) — the doctor handles those.
 func (s *Service) Candidates(ctx context.Context) ([]store.Car, int64, error) {
-	cars, err := s.Store.UnpinnedCars(ctx)
+	cars, err := s.store.UnpinnedCars(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -74,7 +84,7 @@ func (s *Service) Candidates(ctx context.Context) ([]store.Car, int64, error) {
 // removes the row. It returns the number of cars deleted.
 func (s *Service) GC(ctx context.Context) (int, error) {
 	deleted := 0
-	err := s.Store.WithExclusiveGCLock(ctx, func(ctx context.Context) error {
+	err := s.store.WithExclusiveGCLock(ctx, func(ctx context.Context) error {
 		candidates, total, err := s.Candidates(ctx)
 		if err != nil {
 			return err
@@ -83,7 +93,7 @@ func (s *Service) GC(ctx context.Context) (int, error) {
 			return nil
 		}
 
-		channels, err := s.Store.Channels(ctx)
+		channels, err := s.store.Channels(ctx)
 		if err != nil {
 			return err
 		}
@@ -91,7 +101,7 @@ func (s *Service) GC(ctx context.Context) (int, error) {
 		for _, ch := range channels {
 			chByID[ch.ID] = ch
 		}
-		bots, err := s.Store.Bots(ctx)
+		bots, err := s.store.Bots(ctx)
 		if err != nil {
 			return err
 		}
@@ -100,13 +110,13 @@ func (s *Service) GC(ctx context.Context) (int, error) {
 			botByID[b.ID] = b
 		}
 
-		s.Logger.Info().Int("cars", len(candidates)).Int64("bytes", total).
+		s.logger.Info().Int("cars", len(candidates)).Int64("bytes", total).
 			Msg("garbage-collecting unpinned cars")
 
 		for _, car := range candidates {
 			ch, ok := chByID[car.ChannelID]
 			if !ok {
-				s.Logger.Warn().Int64("car_id", car.ID).Msg("car channel not found, skipping")
+				s.logger.Warn().Int64("car_id", car.ID).Msg("car channel not found, skipping")
 				continue
 			}
 			if s.deleteCar(ctx, car, ch, botByID) {
@@ -136,9 +146,9 @@ func (s *Service) deleteCar(
 		// Not pending but no message id: bookkeeping leftover, just drop it.
 		return s.dropRow(ctx, car.ID)
 	}
-	members, err := s.Store.ChannelMembers(ctx, car.ChannelID)
+	members, err := s.store.ChannelMembers(ctx, car.ChannelID)
 	if err != nil {
-		s.Logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load bot membership")
+		s.logger.Warn().Err(err).Int64("car_id", car.ID).Msg("could not load bot membership")
 		return false
 	}
 
@@ -155,33 +165,33 @@ func (s *Service) deleteCar(
 			continue
 		}
 
-		err := s.Transport.DeleteMessage(ctx, bot.Token, ch.TgID, *car.MessageID)
+		err := s.transport.DeleteMessage(ctx, bot.Token, ch.TgID, *car.MessageID)
 		var fw *telegram.FloodWaitError
 		switch {
 		case err == nil, errors.Is(err, telegram.ErrMessageDeleted):
 			return s.dropRow(ctx, car.ID)
 		case errors.As(err, &fw):
-			if serr := s.Store.SetBotUnavailable(ctx, bot.ID, time.Now().Add(fw.RetryAfter)); serr != nil {
-				s.Logger.Warn().Err(serr).Msg("could not record flood-wait")
+			if serr := s.store.SetBotUnavailable(ctx, bot.ID, time.Now().Add(fw.RetryAfter)); serr != nil {
+				s.logger.Warn().Err(serr).Msg("could not record flood-wait")
 			}
 			continue // try another bot
 		case errors.Is(err, telegram.ErrNoAccess):
 			continue // try another bot
 		default:
-			s.Logger.Warn().Err(err).Int64("car_id", car.ID).Str("bot", bot.Username).
+			s.logger.Warn().Err(err).Int64("car_id", car.ID).Str("bot", bot.Username).
 				Msg("error deleting message, trying another bot")
 			continue
 		}
 	}
-	s.Logger.Warn().Int64("car_id", car.ID).
+	s.logger.Warn().Int64("car_id", car.ID).
 		Msg("no bot could delete the message — records kept")
 	return false
 }
 
 // dropRow deletes the car row (blocks and file_ids cascade).
 func (s *Service) dropRow(ctx context.Context, carID int64) bool {
-	if err := s.Store.DeleteCar(ctx, carID); err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.Logger.Warn().Err(err).Int64("car_id", carID).Msg("could not delete car row")
+	if err := s.store.DeleteCar(ctx, carID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Warn().Err(err).Int64("car_id", carID).Msg("could not delete car row")
 		return false
 	}
 	return true

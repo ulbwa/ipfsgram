@@ -29,22 +29,27 @@ type storage interface {
 	DeleteCar(ctx context.Context, carID int64) error
 }
 
-// Service performs explicit removals. Store is *store.Store in production.
+// Service performs explicit removals. store is *store.Store in production.
 type Service struct {
-	Store storage
+	store storage
+}
+
+// New returns a Service backed by the given store. *store.Store satisfies store.
+func New(st storage) *Service {
+	return &Service{store: st}
 }
 
 // Unpin removes the pin with the given root. store.ErrNotFound passes through
 // so the caller can report "pin not found".
 func (s *Service) Unpin(ctx context.Context, root []byte) error {
-	return s.Store.RemovePin(ctx, root)
+	return s.store.RemovePin(ctx, root)
 }
 
 // ChannelRemovePlan reports the impact of removing the channel, for the
 // caller's confirmation prompt: how many pins have at least one block stored
 // in this channel, and the total size of the channel's cars.
 func (s *Service) ChannelRemovePlan(ctx context.Context, channelID int64) (pins int64, bytes int64, err error) {
-	return s.Store.ChannelRemoveStats(ctx, channelID)
+	return s.store.ChannelRemoveStats(ctx, channelID)
 }
 
 // ChannelRemoveExecute deletes the channel row (the schema cascades
@@ -52,12 +57,12 @@ func (s *Service) ChannelRemovePlan(ctx context.Context, channelID int64) (pins 
 // this channel and are now empty. Telegram messages are not deleted.
 // store.ErrNotFound passes through when the channel does not exist.
 func (s *Service) ChannelRemoveExecute(ctx context.Context, channelID int64) error {
-	if err := s.Store.RemoveChannel(ctx, channelID); err != nil {
+	if err := s.store.RemoveChannel(ctx, channelID); err != nil {
 		return err
 	}
 	// The schema cascades cars/blocks/car_file_ids; pins whose blocks all
 	// lived in this channel are now empty — drop them.
-	_, err := s.Store.DeleteOrphanPins(ctx)
+	_, err := s.store.DeleteOrphanPins(ctx)
 	return err
 }
 
@@ -65,7 +70,7 @@ func (s *Service) ChannelRemoveExecute(ctx context.Context, channelID int64) err
 // removed — the bot is the last active member of their channel — and their
 // total size, for the caller's confirmation prompt.
 func (s *Service) BotRemovePlan(ctx context.Context, botID int64) (affected []store.Car, bytes int64, err error) {
-	affected, err = s.Store.CarsAccessibleOnlyVia(ctx, botID)
+	affected, err = s.store.CarsAccessibleOnlyVia(ctx, botID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -80,7 +85,7 @@ func (s *Service) BotRemovePlan(ctx context.Context, botID int64) (affected []st
 // statuses lazily become no_bot_access) unless the caller purges them with
 // PurgeCars.
 func (s *Service) BotRemoveExecute(ctx context.Context, botID int64) error {
-	return s.Store.RemoveBot(ctx, botID)
+	return s.store.RemoveBot(ctx, botID)
 }
 
 // PurgeCars deletes the given car rows (blocks and file_ids cascade) — used to
@@ -88,7 +93,7 @@ func (s *Service) BotRemoveExecute(ctx context.Context, botID int64) error {
 // any row is tolerated (already removed).
 func (s *Service) PurgeCars(ctx context.Context, cars []store.Car) error {
 	for _, c := range cars {
-		if err := s.Store.DeleteCar(ctx, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := s.store.DeleteCar(ctx, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
 	}

@@ -20,26 +20,17 @@ import (
 
 // gcService builds a gc.Service from the app's store and transport.
 func (a *app) gcService() *gc.Service {
-	return &gc.Service{
-		Store:     a.Store,
-		Transport: a.Transport,
-		Logger:    log.Logger,
-	}
+	return gc.New(a.Store, a.Transport, log.Logger)
 }
 
 // removeService builds a remove.Service from the app's store.
 func (a *app) removeService() *remove.Service {
-	return &remove.Service{Store: a.Store}
+	return remove.New(a.Store)
 }
 
 // doctorService builds a doctor.Service from the app's store and transport.
 func (a *app) doctorService() *doctor.Service {
-	return &doctor.Service{
-		Store:     a.Store,
-		Transport: a.Transport,
-		Loads:     selector.NewLoadCounter(),
-		Logger:    log.Logger,
-	}
+	return doctor.New(a.Store, a.Transport, selector.NewLoadCounter(), log.Logger)
 }
 
 // newRmCmd returns the top-level `ipfsgram rm` command.
