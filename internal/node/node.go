@@ -225,16 +225,18 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 			// Default ("auto") bootstrap peers plus any operator-supplied ones.
 			bootstrap := append(dht.GetDefaultBootstrapPeerAddrInfos(), extraBootstrap...)
 			d, derr := dht.New(ctx, h,
-				// ModeAuto, like Kubo: be a DHT server only when this host is
-				// publicly *directly* reachable, otherwise a client. Forcing
-				// ModeServer behind NAT is catastrophic — the whole network dials
-				// this node for routing queries, and with no direct address every
-				// one of those dials is funnelled through the single relay. That
-				// floods the relay's STOP/accept pipeline (10s AcceptTimeout) until
-				// it returns CONNECTION_FAILED for everyone, starving the actual
-				// content retrievals. A NAT'd node must stay a DHT client; it can
-				// still publish provider records and serve its own content.
-				dht.Mode(dht.ModeAuto),
+				// ModeClient: this is a content-provider application, not DHT
+				// routing infrastructure. A client still publishes provider records
+				// and retrieves/serves its own content fully — it just doesn't
+				// answer other peers' routing queries. That distinction is critical
+				// behind NAT: as a DHT *server* (ModeServer, or ModeAuto once AutoNAT
+				// reports a public address) the whole network dials this node for
+				// routing, and with no reliable direct address every such dial is
+				// funnelled through the single relay. That floods the relay's
+				// STOP/accept pipeline (client.AcceptTimeout = 10s) until it returns
+				// CONNECTION_FAILED for everyone — including real retrievals. Staying
+				// a client keeps the relay free to serve actual content.
+				dht.Mode(dht.ModeClient),
 				dht.BootstrapPeers(bootstrap...),
 				// Advertise only WAN-dialable addresses (public + relay
 				// /p2p-circuit) to the global DHT, never this host's private LAN
