@@ -92,6 +92,9 @@ func humanBytes(n int64) string {
 		div *= unit
 		exp++
 	}
-	suffixes := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	suffixes := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	if exp >= len(suffixes) {
+		exp = len(suffixes) - 1
+	}
 	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffixes[exp])
 }

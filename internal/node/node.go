@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ipfs/boxo/bitswap"
@@ -134,8 +135,10 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	// kadDHT is constructed inside the libp2p.Routing hook (so AutoRelay can use
-	// it as a peer source) and captured here for Bitswap and the reprovider.
-	var kadDHT *dht.IpfsDHT
+	// it as a peer source) and captured here for Bitswap and the reprovider. It is
+	// held atomically: the hook runs on the libp2p.New goroutine while the
+	// relayPeerSource goroutine reads it concurrently.
+	var kadDHTPtr atomic.Pointer[dht.IpfsDHT]
 
 	// relayPeerSource feeds AutoRelay with circuit-relay v2 servers: the
 	// configured static relays first (so they are always tried, even before the
@@ -159,10 +162,11 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 					return
 				}
 			}
-			if sent >= num || kadDHT == nil {
+			d := kadDHTPtr.Load()
+			if sent >= num || d == nil {
 				return
 			}
-			rd := routingdisc.NewRoutingDiscovery(kadDHT)
+			rd := routingdisc.NewRoutingDiscovery(d)
 			peers, err := discutil.FindPeers(ctx, rd, "/libp2p/relay", discovery.Limit(num-sent))
 			if err != nil {
 				return
@@ -217,7 +221,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 				// address exists. LAN discovery is unaffected (it uses mDNS).
 				dht.AddressFilter(wanAddrs),
 			)
-			kadDHT = d
+			kadDHTPtr.Store(d)
 			return d, derr
 		}),
 	}
@@ -247,6 +251,9 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node: start libp2p host: %w", err)
 	}
+	// The Routing hook has run synchronously inside libp2p.New; from here kadDHT
+	// is used single-threaded.
+	kadDHT := kadDHTPtr.Load()
 	if kadDHT == nil {
 		h.Close()
 		return nil, errors.New("node: dht was not initialised")

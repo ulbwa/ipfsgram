@@ -10,6 +10,7 @@ package car
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -84,6 +85,13 @@ func (p *RotatingPacker) Add(c cid.Cid, data []byte) error {
 	}
 	if !c.Defined() {
 		return errors.New("car: block cid is undefined")
+	}
+	// Block lengths are persisted as int32 (store.BlockRef.Length) and replayed
+	// by ReadBlockAt; reject anything that would overflow rather than silently
+	// truncating to a negative length. UnixFS chunking keeps blocks well under
+	// this, so it is a guard at the trust boundary, not a real limit.
+	if int64(len(data)) > math.MaxInt32 {
+		return fmt.Errorf("car: block too large: %d bytes", len(data))
 	}
 
 	cidBytes := c.Bytes()

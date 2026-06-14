@@ -253,7 +253,17 @@ func listenAndProvide(ctx context.Context, dsn string, n *node.Node) {
 			}
 			log.Info().Stringer("cid", c).Msg("announced new content to the DHT")
 		}
-		// Channel closed: connection lost or ctx done. Loop to reconnect.
+		// Channel closed: connection lost or ctx done. Back off before
+		// reconnecting so a flapping Postgres connection (which can close the
+		// channel without a connect error) does not spin in a tight loop.
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 

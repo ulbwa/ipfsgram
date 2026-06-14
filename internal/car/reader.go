@@ -4,6 +4,7 @@
 package car
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +29,7 @@ func ReadBlockAt(path string, off int64, length int32) ([]byte, error) {
 
 	buf := make([]byte, length)
 	if _, err := f.ReadAt(buf, off); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
 		return nil, fmt.Errorf("car: read %d bytes at %d from %s: %w", length, off, path, err)
