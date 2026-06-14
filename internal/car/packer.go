@@ -146,6 +146,19 @@ func (p *RotatingPacker) Finish() ([]PackedCar, error) {
 	return p.finished, nil
 }
 
+// Close releases the current open CAR file, if any. It is safe to call after
+// Finish (then a no-op) and on every error path, so a caller can defer it to
+// release the descriptor even when Add fails mid-write and Finish is never
+// reached. It does not remove files; the caller's temp-dir cleanup handles that.
+func (p *RotatingPacker) Close() error {
+	if p.file == nil {
+		return nil
+	}
+	err := p.file.Close()
+	p.file = nil
+	return err
+}
+
 // openNext creates the next CAR file and writes its header.
 func (p *RotatingPacker) openNext() error {
 	p.seq++

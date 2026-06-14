@@ -128,6 +128,7 @@ func (p *fakePacker) Finish() ([]car.PackedCar, error) {
 	f.Close()
 	return []car.PackedCar{{Path: f.Name(), Size: 3, Blocks: p.blocks}}, nil
 }
+func (p *fakePacker) Close() error { return nil }
 
 func TestPublishHappyPath(t *testing.T) {
 	root := testCID(t, "root")

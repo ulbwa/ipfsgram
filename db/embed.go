@@ -68,7 +68,14 @@ func Connect(ctx context.Context, dsn string) (*gorm.DB, error) {
 func Migrate(dsn string) error {
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return fmt.Errorf("parse dsn: %w", err)
+		// url.Parse embeds the raw DSN (including the password) in its error
+		// text; surface only the underlying reason so the connection string
+		// never reaches logs.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return fmt.Errorf("parse dsn: %w", ue.Err)
+		}
+		return errors.New("parse dsn: invalid connection string")
 	}
 
 	m := dbmate.New(u)

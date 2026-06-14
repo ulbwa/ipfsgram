@@ -76,6 +76,7 @@ type database interface {
 type carPacker interface {
 	Add(c cid.Cid, data []byte) error
 	Finish() ([]car.PackedCar, error)
+	Close() error
 }
 
 // Publisher publishes content to Telegram channels.
@@ -352,6 +353,9 @@ func (p *Publisher) packAndUpload(
 	if err != nil {
 		return err
 	}
+	// Release the packer's open CAR descriptor on every path: Add can fail
+	// mid-write and return before Finish closes the file.
+	defer packer.Close()
 	for _, b := range blocks {
 		if err := packer.Add(b.CID, b.Data); err != nil {
 			return err
