@@ -52,7 +52,8 @@ const ttlCapacity = 1 << 20
 // golang-lru/v2's expirable.LRU. Existing "<carID>.car" files are adopted; the
 // library starts their ttl clock at adoption time (it cannot be told the
 // original insertion time), so a restart resets the remaining lifetime to a
-// full ttl. Close clears the cache (which stops the library's reaper).
+// full ttl. Close only marks the cache closed; it deliberately leaves the
+// on-disk files in place so they are re-adopted on the next start.
 func NewTTL(dir string, ttl time.Duration) (Cache, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("cache: ttl must be positive, got %v", ttl)

@@ -103,11 +103,12 @@ func Run(ctx context.Context, cfg Config, st *store.Store, tr transport) error {
 		}
 	}()
 
-	logEvent := log.Info().Str("peer_id", n.Host.ID().String())
-	for _, addr := range n.Host.Addrs() {
-		logEvent = logEvent.Str("listen", addr.String())
+	hostAddrs := n.Host.Addrs()
+	listen := make([]string, 0, len(hostAddrs))
+	for _, addr := range hostAddrs {
+		listen = append(listen, addr.String())
 	}
-	logEvent.Msg("daemon started")
+	log.Info().Str("peer_id", n.Host.ID().String()).Strs("listen", listen).Msg("daemon started")
 
 	// Announce pin roots to the DHT first (a handful of CIDs), so gateways and
 	// the retrieval checker can discover the content by its root CID within

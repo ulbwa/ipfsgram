@@ -14,6 +14,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Cache is a disk cache of CAR files keyed by carID. It is implemented by the
@@ -92,8 +94,16 @@ func scanDir(dir string) ([]adopted, error) {
 // rename fails because src lives on a different filesystem (temp downloads may
 // be on another mount).
 func moveFile(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
+	err := os.Rename(src, dst)
+	if err == nil {
 		return nil
+	}
+	// Only a cross-filesystem rename (EXDEV) warrants the copy fallback. Any
+	// other failure (permissions, a bad path, dst problems) is a real error: we
+	// surface it instead of masking it behind a copy that would fail differently
+	// or, worse, partially succeed.
+	if !errors.Is(err, syscall.EXDEV) {
+		return fmt.Errorf("cache: rename: %w", err)
 	}
 	in, err := os.Open(src)
 	if err != nil {
