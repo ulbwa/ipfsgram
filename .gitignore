@@ -33,3 +33,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local superpowers working files — never committed
+docs/superpowers/
+
+# Stray local build artifacts
+/_imggen
