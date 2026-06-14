@@ -37,6 +37,7 @@ import (
 	routingdisc "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	discutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/rs/zerolog/log"
@@ -183,8 +184,21 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	listenAddrs := append([]string{}, cfg.ListenAddrs...)
+	// Unlimited resource manager. The default limiter caps system-wide
+	// connections/streams and, on a node that serves content through a relay,
+	// rejects the relay's inbound STOP streams once the cap is hit ("cannot
+	// reserve ... resource limit exceeded"). The relay then can't forward and the
+	// client sees CONNECTION_FAILED — a vicious cycle, because every rejected
+	// client retries and keeps the limit maxed. A provider node must always be
+	// able to accept the relayed connections it exists to serve.
+	rmgr, err := rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(rcmgr.InfiniteLimits))
+	if err != nil {
+		return nil, fmt.Errorf("node: resource manager: %w", err)
+	}
+
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
+		libp2p.ResourceManager(rmgr),
 		// The default transports already include WebRTC-direct (browser-grade
 		// ICE/STUN NAT traversal); we enable it by listening on a webrtc-direct
 		// multiaddr (see cmd defaultListen). It makes a node behind a home/CGNAT
@@ -206,7 +220,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		// be reachable without relying on a relay.
 		libp2p.EnableAutoNATv2(),
 		libp2p.EnableHolePunching(),
-		libp2p.EnableAutoRelayWithPeerSource(relayPeerSource, autorelay.WithMinInterval(0)),
+		autoRelayOption(staticRelays, relayPeerSource),
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
 			// Default ("auto") bootstrap peers plus any operator-supplied ones.
 			bootstrap := append(dht.GetDefaultBootstrapPeerAddrInfos(), extraBootstrap...)
@@ -332,6 +346,20 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		n.certMgr = certMgr
 	}
 	return n, nil
+}
+
+// autoRelayOption configures AutoRelay. With configured static relays (the
+// operator's own relays) it reserves on exactly those and keeps the reservations
+// refreshed — Kubo's Swarm.RelayClient.StaticRelays behavior — which holds a
+// stable /p2p-circuit address. A peer source instead lets AutoRelay rotate and
+// drop relays, so the relay can end up with a reservation but no live connection
+// to forward over (the circuit dial then fails with CONNECTION_FAILED). When no
+// static relays are configured it falls back to discovering relays via the DHT.
+func autoRelayOption(staticRelays []peer.AddrInfo, peerSource autorelay.PeerSource) libp2p.Option {
+	if len(staticRelays) > 0 {
+		return libp2p.EnableAutoRelayWithStaticRelays(staticRelays, autorelay.WithNumRelays(len(staticRelays)))
+	}
+	return libp2p.EnableAutoRelayWithPeerSource(peerSource, autorelay.WithMinInterval(0))
 }
 
 // wanAddrs keeps only WAN-reachable multiaddrs — public IPs and relay
