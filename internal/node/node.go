@@ -184,13 +184,13 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	listenAddrs := append([]string{}, cfg.ListenAddrs...)
-	// Unlimited resource manager. The default limiter caps system-wide
-	// connections/streams and, on a node that serves content through a relay,
-	// rejects the relay's inbound STOP streams once the cap is hit ("cannot
-	// reserve ... resource limit exceeded"). The relay then can't forward and the
-	// client sees CONNECTION_FAILED — a vicious cycle, because every rejected
-	// client retries and keeps the limit maxed. A provider node must always be
-	// able to accept the relayed connections it exists to serve.
+	// Unlimited resource manager. This node both maintains a relay reservation and
+	// receives ALL of the relay's forwarded inbound connections as STOP streams
+	// from a single peer (the relay). Scaled/per-peer limits throttle exactly that
+	// peer, which starves the reservation-refresh and forwarded STOP streams, so
+	// the reservation is dropped (relay returns NO_RESERVATION) — verified
+	// empirically. A node serving content through one relay must not rate-limit
+	// that relay, so it uses unlimited limits.
 	rmgr, err := rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(rcmgr.InfiniteLimits))
 	if err != nil {
 		return nil, fmt.Errorf("node: resource manager: %w", err)
