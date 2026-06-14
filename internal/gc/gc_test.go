@@ -100,7 +100,7 @@ func TestGCDeletesUnpinnedCar(t *testing.T) {
 	}
 }
 
-func TestGCCandidatesExcludesPending(t *testing.T) {
+func TestCandidatesExcludesPending(t *testing.T) {
 	msgID := int64(7)
 	st := &fakeStore{
 		unpinned: []store.Car{
@@ -109,9 +109,9 @@ func TestGCCandidatesExcludesPending(t *testing.T) {
 		},
 	}
 	s := &Service{Store: st, Logger: zerolog.New(io.Discard)}
-	got, total, err := s.GCCandidates(context.Background())
+	got, total, err := s.Candidates(context.Background())
 	if err != nil {
-		t.Fatalf("GCCandidates: %v", err)
+		t.Fatalf("Candidates: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != 1 {
 		t.Errorf("candidates = %v, want [car 1]", got)

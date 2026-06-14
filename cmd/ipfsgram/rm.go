@@ -105,7 +105,7 @@ func runGC(cmd *cobra.Command, yes bool) error {
 
 	// Preview and prompt BEFORE GC takes the exclusive lock: an
 	// interactive prompt must not stall concurrent publishers.
-	candidates, total, err := svc.GCCandidates(ctx)
+	candidates, total, err := svc.Candidates(ctx)
 	if err != nil {
 		return err
 	}

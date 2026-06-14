@@ -18,11 +18,9 @@ const (
 // dedupPlan is the pure outcome of the dedup decision for Publish.
 type dedupPlan struct {
 	// Skip holds CIDs (string(cid.Bytes())) already available in live published
-	// cars: they are NOT re-uploaded.
+	// cars: they are NOT re-uploaded. Every other existing block is re-uploaded
+	// implicitly (the caller repoints its row to the new car after upload).
 	Skip map[string]bool
-	// Reupload holds CIDs that exist in the database but must be re-uploaded
-	// (their rows are repointed to the new car after upload).
-	Reupload map[string]bool
 	// DeleteCars lists cars whose message is physically deleted: their rows are
 	// removed from the database immediately.
 	DeleteCars []int64
@@ -43,7 +41,6 @@ func planDedup(
 ) dedupPlan {
 	plan := dedupPlan{
 		Skip:      make(map[string]bool),
-		Reupload:  make(map[string]bool),
 		SetStatus: make(map[int64]store.CarStatus),
 	}
 
@@ -71,8 +68,6 @@ func planDedup(
 		if statuses[ref.CarID] == store.CarPublished &&
 			checks[ref.CarID] == checkOK && !deleted[ref.CarID] {
 			plan.Skip[cidKey] = true
-		} else {
-			plan.Reupload[cidKey] = true
 		}
 	}
 	return plan

@@ -74,10 +74,10 @@ type MembershipReport struct {
 	Changes []MembershipChange
 }
 
-// DoctorOrphans returns pending cars older than olderThan — interrupted or
+// Orphans returns pending cars older than olderThan — interrupted or
 // in-flight publishes whose pending rows were never completed. It takes no lock
 // so the caller can preview and confirm before calling CleanOrphans.
-func (s *Service) DoctorOrphans(ctx context.Context, olderThan time.Duration) ([]store.Car, error) {
+func (s *Service) Orphans(ctx context.Context, olderThan time.Duration) ([]store.Car, error) {
 	return s.Store.OrphanPendingCars(ctx, olderThan)
 }
 

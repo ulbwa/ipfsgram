@@ -23,7 +23,6 @@ func TestPlanDedup(t *testing.T) {
 		statuses   map[int64]store.CarStatus
 		checks     map[int64]carCheck
 		wantSkip   []string
-		wantReup   []string
 		wantDelete []int64
 		wantStatus map[int64]store.CarStatus
 	}{
@@ -45,7 +44,6 @@ func TestPlanDedup(t *testing.T) {
 			},
 			statuses:   map[int64]store.CarStatus{2: store.CarPublished},
 			checks:     map[int64]carCheck{2: checkDeleted},
-			wantReup:   []string{cidA},
 			wantDelete: []int64{2},
 			wantStatus: map[int64]store.CarStatus{},
 		},
@@ -56,7 +54,6 @@ func TestPlanDedup(t *testing.T) {
 			},
 			statuses:   map[int64]store.CarStatus{3: store.CarPublished},
 			checks:     map[int64]carCheck{3: checkNoAccess},
-			wantReup:   []string{cidA},
 			wantStatus: map[int64]store.CarStatus{3: store.CarNoBotAccess},
 		},
 		{
@@ -66,7 +63,6 @@ func TestPlanDedup(t *testing.T) {
 			},
 			statuses:   map[int64]store.CarStatus{4: store.CarPublished},
 			checks:     map[int64]carCheck{4: checkTooLarge},
-			wantReup:   []string{cidA},
 			wantStatus: map[int64]store.CarStatus{4: store.CarTooLarge},
 		},
 		{
@@ -76,7 +72,6 @@ func TestPlanDedup(t *testing.T) {
 			},
 			statuses:   map[int64]store.CarStatus{5: store.CarPending},
 			checks:     map[int64]carCheck{},
-			wantReup:   []string{cidA},
 			wantStatus: map[int64]store.CarStatus{},
 		},
 		{
@@ -94,7 +89,6 @@ func TestPlanDedup(t *testing.T) {
 				6: checkDeleted,
 			},
 			wantSkip:   []string{cidA},
-			wantReup:   []string{cidC},
 			wantDelete: []int64{6},
 			wantStatus: map[int64]store.CarStatus{},
 		},
@@ -106,9 +100,6 @@ func TestPlanDedup(t *testing.T) {
 
 			if got := keys(plan.Skip); !equalStrings(got, tt.wantSkip) {
 				t.Errorf("Skip = %v, want %v", got, tt.wantSkip)
-			}
-			if got := keys(plan.Reupload); !equalStrings(got, tt.wantReup) {
-				t.Errorf("Reupload = %v, want %v", got, tt.wantReup)
 			}
 			gotDelete := append([]int64(nil), plan.DeleteCars...)
 			sort.Slice(gotDelete, func(i, j int) bool { return gotDelete[i] < gotDelete[j] })

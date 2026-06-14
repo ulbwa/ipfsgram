@@ -49,7 +49,7 @@ func runDoctor(cmd *cobra.Command, yes bool) error {
 // doctorOrphans is phase 1: list orphaned pending CARs and optionally delete them.
 func doctorOrphans(ctx context.Context, svc *doctor.Service, yes bool) error {
 	fmt.Fprintln(stdout, "Phase 1: orphaned pending CARs")
-	orphans, err := svc.DoctorOrphans(ctx, doctor.OrphanPendingAge)
+	orphans, err := svc.Orphans(ctx, doctor.OrphanPendingAge)
 	if err != nil {
 		return err
 	}

@@ -123,13 +123,13 @@ func newService(st storage, tr transport) *Service {
 	}
 }
 
-func TestDoctorOrphans(t *testing.T) {
+func TestOrphans(t *testing.T) {
 	want := []store.Car{{ID: 1, Status: store.CarPending}}
 	st := &fakeStore{orphans: want}
 	s := newService(st, &fakeTransport{})
-	got, err := s.DoctorOrphans(context.Background(), OrphanPendingAge)
+	got, err := s.Orphans(context.Background(), OrphanPendingAge)
 	if err != nil {
-		t.Fatalf("DoctorOrphans: %v", err)
+		t.Fatalf("Orphans: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != 1 {
 		t.Errorf("orphans = %v, want car 1", got)

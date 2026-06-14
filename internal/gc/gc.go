@@ -2,7 +2,7 @@
 // preview and the deletion pass under the exclusive advisory lock.
 
 // Package gc garbage-collects unpinned CARs (`ipfsgram gc`): a lock-free
-// GCCandidates step (so the caller can preview and confirm) and a GC step that
+// Candidates step (so the caller can preview and confirm) and a GC step that
 // re-fetches and deletes under the exclusive advisory lock, removing each car's
 // Telegram message via a can_delete member bot and dropping its rows. The
 // narrow store/telegram interfaces it needs are declared here, on the consumer
@@ -46,11 +46,11 @@ type Service struct {
 	Logger    zerolog.Logger
 }
 
-// GCCandidates returns the unpinned cars eligible for collection and their total
+// Candidates returns the unpinned cars eligible for collection and their total
 // size. It takes no lock so the caller can preview and prompt without stalling
 // concurrent publishers. Pending cars belong to an in-flight or interrupted
 // publish (no pin yet, no message to delete) — the doctor handles those.
-func (s *Service) GCCandidates(ctx context.Context) ([]store.Car, int64, error) {
+func (s *Service) Candidates(ctx context.Context) ([]store.Car, int64, error) {
 	cars, err := s.Store.UnpinnedCars(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -75,7 +75,7 @@ func (s *Service) GCCandidates(ctx context.Context) ([]store.Car, int64, error) 
 func (s *Service) GC(ctx context.Context) (int, error) {
 	deleted := 0
 	err := s.Store.WithExclusiveGCLock(ctx, func(ctx context.Context) error {
-		candidates, total, err := s.GCCandidates(ctx)
+		candidates, total, err := s.Candidates(ctx)
 		if err != nil {
 			return err
 		}
